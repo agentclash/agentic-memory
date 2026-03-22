@@ -6,6 +6,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from models.semantic import SemanticMemory
 from stores.semantic_store import SemanticStore
+from retrieval.retriever import UnifiedRetriever
+
+
+def _make_retriever() -> UnifiedRetriever:
+    return UnifiedRetriever(stores={"semantic": SemanticStore()})
 
 
 def cmd_store(args):
@@ -16,13 +21,19 @@ def cmd_store(args):
 
 
 def cmd_query(args):
-    store = SemanticStore()
-    results = store.retrieve(args.query, top_k=args.top_k)
+    retriever = _make_retriever()
+    results = retriever.query(args.query, top_k=args.top_k)
     if not results:
         print("No results found.")
         return
-    for rank, (record, score) in enumerate(results, 1):
-        print(f"  {rank}. [{score:.4f}] {record.content}")
+    for rank, r in enumerate(results, 1):
+        age = r.record.created_at.strftime("%Y-%m-%d %H:%M")
+        print(
+            f"  {rank}. [{r.final_score:.4f}] {r.record.content}\n"
+            f"     type={r.record.memory_type}  stored={age}  "
+            f"accessed={r.record.access_count}x  "
+            f"sim={r.raw_similarity:.4f}  rec={r.recency_score:.4f}  imp={r.importance_score:.2f}"
+        )
 
 
 def main():

@@ -64,25 +64,41 @@ class SemanticStore(BaseStore):
     # ── serialisation helpers ──────────────────────────────────────────────
     # ChromaDB metadata must be flat (str/int/float/bool only — no nested dicts).
 
+    def update_access(self, record_id: str) -> None:
+        now = datetime.now(timezone.utc)
+        result = self._collection.get(ids=[record_id], include=["metadatas"])
+        if not result["ids"]:
+            return
+        meta = result["metadatas"][0]
+        meta["access_count"] = int(meta.get("access_count", 0)) + 1
+        meta["last_accessed_at"] = now.isoformat()
+        self._collection.update(ids=[record_id], metadatas=[meta])
+
+    # ── serialisation helpers ──────────────────────────────────────────────
+    # ChromaDB metadata must be flat (str/int/float/bool only — no nested dicts).
+
     def _to_metadata(self, record: SemanticMemory) -> dict:
         return {
             "memory_type": record.memory_type,
             "modality": record.modality,
             "created_at": record.created_at.isoformat(),
+            "last_accessed_at": record.last_accessed_at.isoformat() if record.last_accessed_at else "",
+            "access_count": record.access_count,
             "importance": record.importance,
             "source": record.source or "",
             "category": record.category,
             "confidence": record.confidence,
         }
 
-    def _from_result(self, result: dict, index: int) -> SemanticMemory:
-        """Deserialise from .get() result (flat lists)."""
-        meta = result["metadatas"][index]
+    def _build_record(self, doc: str, id: str, embedding, meta: dict) -> SemanticMemory:
+        last_accessed = meta.get("last_accessed_at", "")
         return SemanticMemory(
-            content=result["documents"][index],
-            id=result["ids"][index],
-            embedding=result["embeddings"][index],
+            content=doc,
+            id=id,
+            embedding=embedding,
             created_at=datetime.fromisoformat(meta["created_at"]),
+            last_accessed_at=datetime.fromisoformat(last_accessed) if last_accessed else None,
+            access_count=int(meta.get("access_count", 0)),
             importance=float(meta["importance"]),
             source=meta["source"] or None,
             category=meta["category"],
@@ -90,17 +106,16 @@ class SemanticStore(BaseStore):
             modality=meta["modality"],
         )
 
+    def _from_result(self, result: dict, index: int) -> SemanticMemory:
+        """Deserialise from .get() result (flat lists)."""
+        return self._build_record(
+            result["documents"][index], result["ids"][index],
+            result["embeddings"][index], result["metadatas"][index],
+        )
+
     def _from_query_result(self, result: dict, index: int) -> SemanticMemory:
         """Deserialise from .query() result (nested lists — one list per query)."""
-        meta = result["metadatas"][0][index]
-        return SemanticMemory(
-            content=result["documents"][0][index],
-            id=result["ids"][0][index],
-            embedding=result["embeddings"][0][index],
-            created_at=datetime.fromisoformat(meta["created_at"]),
-            importance=float(meta["importance"]),
-            source=meta["source"] or None,
-            category=meta["category"],
-            confidence=float(meta["confidence"]),
-            modality=meta["modality"],
+        return self._build_record(
+            result["documents"][0][index], result["ids"][0][index],
+            result["embeddings"][0][index], result["metadatas"][0][index],
         )
