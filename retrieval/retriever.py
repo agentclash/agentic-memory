@@ -1,5 +1,9 @@
+from datetime import datetime, timezone
+
 from stores.base import BaseStore
 from retrieval.ranking import RankedResult, rank_results
+
+CANDIDATE_MULTIPLIER = 3  # over-fetch from each store to give the reranker room
 
 
 class UnifiedRetriever:
@@ -21,14 +25,18 @@ class UnifiedRetriever:
         recency_weight: float = 0.3,
         importance_weight: float = 0.3,
     ) -> list[RankedResult]:
-        # ── fan-out: query matching stores in parallel (sequential for now) ─
+        # ── fan-out: query matching stores ──────────────────────────────────
         targets = self._stores
         if memory_types:
             targets = {k: v for k, v in self._stores.items() if k in memory_types}
 
+        # Over-fetch so recency/importance can rescue items outside the
+        # initial similarity slice.
+        fetch_k = top_k * CANDIDATE_MULTIPLIER
+
         all_results = []
         for store in targets.values():
-            all_results.extend(store.retrieve(text, top_k=top_k))
+            all_results.extend(store.retrieve(text, top_k=fetch_k))
 
         # ── rank across all stores ──────────────────────────────────────────
         ranked = rank_results(
@@ -38,10 +46,16 @@ class UnifiedRetriever:
             importance_weight=importance_weight,
         )
 
+        final = ranked[:top_k]
+
         # ── update access tracking on returned records ──────────────────────
-        for r in ranked[:top_k]:
+        now = datetime.now(timezone.utc)
+        for r in final:
             store = self._stores.get(r.record.memory_type)
             if store:
                 store.update_access(r.record.id)
+                # Keep in-memory record in sync so callers see current values
+                r.record.access_count += 1
+                r.record.last_accessed_at = now
 
-        return ranked[:top_k]
+        return final

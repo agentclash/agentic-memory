@@ -1,7 +1,7 @@
 import chromadb
 from datetime import datetime, timezone
 
-from config import CHROMA_DB_PATH
+import config
 from models.semantic import SemanticMemory
 from stores.base import BaseStore
 from utils.embeddings import GeminiEmbedder
@@ -11,7 +11,7 @@ class SemanticStore(BaseStore):
     """ChromaDB-backed store for semantic (factual) memories."""
 
     def __init__(self):
-        client = chromadb.PersistentClient(path=CHROMA_DB_PATH)
+        client = chromadb.PersistentClient(path=config.CHROMA_DB_PATH)
         self._collection = client.get_or_create_collection(
             name="semantic_memories",
             metadata={"hnsw:space": "cosine"},

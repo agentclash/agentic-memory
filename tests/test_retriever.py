@@ -10,20 +10,24 @@ from models.semantic import SemanticMemory
 from stores.semantic_store import SemanticStore
 from retrieval.retriever import UnifiedRetriever
 
-TEST_DB = "./chroma_test_retriever"
+TEST_DB_BASE = "./chroma_test_retriever"
+_test_counter = 0
 
 
 def fresh_setup():
-    shutil.rmtree(TEST_DB, ignore_errors=True)
+    global _test_counter
+    _test_counter += 1
+    db_path = f"{TEST_DB_BASE}_{_test_counter}"
+    shutil.rmtree(db_path, ignore_errors=True)
     import config
-    config.CHROMA_DB_PATH = TEST_DB
+    config.CHROMA_DB_PATH = db_path
     store = SemanticStore()
     retriever = UnifiedRetriever(stores={"semantic": store})
-    return store, retriever
+    return store, retriever, db_path
 
 
 def test_ranked_retrieval():
-    store, retriever = fresh_setup()
+    store, retriever, _ = fresh_setup()
 
     store.store(SemanticMemory(content="Python was created by Guido van Rossum"))
     store.store(SemanticMemory(content="The capital of France is Paris"))
@@ -38,19 +42,24 @@ def test_ranked_retrieval():
 
 
 def test_access_count_increments():
-    store, retriever = fresh_setup()
+    store, retriever, _ = fresh_setup()
 
     store.store(SemanticMemory(content="Rust was created by Graydon Hoare"))
 
     for i in range(1, 4):
         results = retriever.query("Who created Rust?", top_k=1)
+        # Returned record should reflect the updated count (not off-by-one)
+        assert results[0].record.access_count == i, (
+            f"Expected returned access_count={i}, got {results[0].record.access_count}"
+        )
+        # Persisted count should match
         record = store.get_by_id(results[0].record.id)
-        assert record.access_count == i, f"Expected access_count={i}, got {record.access_count}"
-    print(f"  PASS  access_count increments: 1 → 2 → 3")
+        assert record.access_count == i, f"Expected persisted access_count={i}, got {record.access_count}"
+    print(f"  PASS  access_count increments: 1 → 2 → 3 (returned + persisted match)")
 
 
 def test_access_persists_across_instances():
-    store, retriever = fresh_setup()
+    store, retriever, db_path = fresh_setup()
     store.store(SemanticMemory(content="Go was created at Google"))
 
     # Query twice
@@ -59,7 +68,7 @@ def test_access_persists_across_instances():
 
     # Create fresh store + retriever (simulates process restart)
     import config
-    config.CHROMA_DB_PATH = TEST_DB
+    config.CHROMA_DB_PATH = db_path
     store2 = SemanticStore()
     retriever2 = UnifiedRetriever(stores={"semantic": store2})
 
@@ -70,7 +79,7 @@ def test_access_persists_across_instances():
 
 
 def test_memory_types_filter():
-    store, retriever = fresh_setup()
+    store, retriever, _ = fresh_setup()
     store.store(SemanticMemory(content="Test fact"))
 
     results = retriever.query("test", memory_types=["semantic"])
@@ -81,8 +90,24 @@ def test_memory_types_filter():
     print(f"  PASS  memory_types filter works")
 
 
+def test_over_fetch():
+    """Verify that the reranker sees more candidates than top_k."""
+    store, retriever, _ = fresh_setup()
+
+    store.store(SemanticMemory(content="Alpha fact about testing"))
+    store.store(SemanticMemory(content="Beta fact about testing"))
+    store.store(SemanticMemory(content="Gamma fact about testing"))
+
+    # With top_k=1 and over-fetch, the reranker still gets 3 candidates
+    results = retriever.query("testing", top_k=1)
+    assert len(results) == 1, "Should return exactly top_k results"
+    print(f"  PASS  top_k=1 returns 1 result (reranker had 3 candidates)")
+
+
 def cleanup():
-    shutil.rmtree(TEST_DB, ignore_errors=True)
+    import glob
+    for d in glob.glob(f"{TEST_DB_BASE}*"):
+        shutil.rmtree(d, ignore_errors=True)
 
 
 if __name__ == "__main__":
@@ -92,6 +117,7 @@ if __name__ == "__main__":
         test_access_count_increments()
         test_access_persists_across_instances()
         test_memory_types_filter()
+        test_over_fetch()
         print("\nAll tests passed.")
     finally:
         cleanup()
