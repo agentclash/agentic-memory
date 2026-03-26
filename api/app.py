@@ -8,7 +8,6 @@ from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
@@ -21,6 +20,7 @@ from models.episodic import EpisodicMemory
 from models.semantic import SemanticMemory
 from retrieval.retriever import UnifiedRetriever
 from stores.episodic_store import EpisodicStore, EpisodicStoreError, MediaTooLargeError
+from stores.media_store import MediaStore
 from stores.semantic_store import SemanticStore
 from utils.embeddings import TextEmbedder
 
@@ -29,7 +29,7 @@ DEFAULT_ALLOWED_ORIGINS = [
     "https://memory.agentclash.dev",
 ]
 
-DEFAULT_UPLOAD_DIR = Path(os.getenv("MEMORY_UPLOAD_DIR", "/tmp/agentic-memory-uploads"))
+DEFAULT_MEDIA_DIR = Path(os.getenv("MEMORY_MEDIA_DIR", config.MEDIA_STORAGE_PATH))
 _SUPPORTED_MEDIA_MODALITIES = {"audio", "image", "video", "pdf"}
 
 
@@ -143,12 +143,10 @@ class MemoryAPIService:
         self,
         *,
         chroma_path: str | None = None,
-        upload_dir: Path | None = None,
+        media_root: Path | None = None,
         embedder: TextEmbedder | None = None,
     ):
-        upload_root = upload_dir or DEFAULT_UPLOAD_DIR
-        upload_root.mkdir(parents=True, exist_ok=True)
-        self.upload_dir = upload_root
+        self.media_store = MediaStore(media_root or DEFAULT_MEDIA_DIR)
         self.bus = EventBus()
         original_chroma_path = config.CHROMA_DB_PATH
         try:
@@ -164,13 +162,12 @@ class MemoryAPIService:
         )
         self.events = EventRecorder(self.bus)
 
-    def save_upload(self, upload: UploadFile) -> tuple[str, str]:
-        suffix = Path(upload.filename or "upload").suffix
-        target = self.upload_dir / f"{uuid4()}{suffix}"
+    def save_upload(self, upload: UploadFile, memory_id: str) -> tuple[str, str]:
         guessed_mime = upload.content_type or mimetypes.guess_type(upload.filename or "")[0] or "application/octet-stream"
         contents = upload.file.read()
-        target.write_bytes(contents)
-        return str(target), guessed_mime
+        filename = upload.filename or "upload.bin"
+        media_ref = self.media_store.store_bytes(contents, filename, memory_id)
+        return media_ref, guessed_mime
 
     def overview(self) -> dict[str, Any]:
         semantic_count = self.semantic_store._collection.count()
@@ -187,7 +184,7 @@ class MemoryAPIService:
 def create_app(
     *,
     chroma_path: str | None = None,
-    upload_dir: str | None = None,
+    media_root: str | None = None,
     allowed_origins: list[str] | None = None,
     embedder: TextEmbedder | None = None,
 ) -> FastAPI:
@@ -202,7 +199,7 @@ def create_app(
     app.state.service = None
     app.state.service_config = {
         "chroma_path": chroma_path,
-        "upload_dir": Path(upload_dir) if upload_dir else None,
+        "media_root": Path(media_root) if media_root else None,
         "embedder": embedder,
     }
 
@@ -263,8 +260,7 @@ def create_app(
         importance: float = Form(default=0.5),
         file: UploadFile = File(...),
     ) -> dict[str, Any]:
-        media_ref, mime_type = service().save_upload(file)
-        inferred_modality = _infer_media_modality(mime_type=mime_type, filename=file.filename)
+        inferred_modality = _infer_media_modality(mime_type=file.content_type, filename=file.filename)
         resolved_modality = inferred_modality or modality
         if resolved_modality not in _SUPPORTED_MEDIA_MODALITIES:
             raise HTTPException(
@@ -275,17 +271,20 @@ def create_app(
             content=content or f"{resolved_modality} episode from {file.filename}",
             session_id=session_id,
             modality=resolved_modality,
-            media_ref=media_ref,
-            source_mime_type=mime_type,
             turn_number=turn_number,
             summary=summary,
             importance=importance,
         )
+        media_ref, mime_type = service().save_upload(file, record.id)
+        record.media_ref = media_ref
+        record.source_mime_type = mime_type
         try:
             service().episodic_store.store(record)
         except MediaTooLargeError as exc:
+            service().media_store.delete(media_ref)
             raise HTTPException(status_code=413, detail=str(exc)) from exc
         except EpisodicStoreError as exc:
+            service().media_store.delete(media_ref)
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"record": _serialise_record(record)}
 

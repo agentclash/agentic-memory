@@ -10,8 +10,10 @@ from events import ConsoleLogger, EventBus
 from models.episodic import EpisodicMemory
 from models.semantic import SemanticMemory
 from stores.episodic_store import EpisodicStore
+from stores.media_store import MediaStore
 from stores.semantic_store import SemanticStore
 from retrieval.retriever import UnifiedRetriever
+import config
 
 _DEFAULT_MIME_TYPES = {
     "audio": "audio/mpeg",
@@ -33,6 +35,10 @@ def _make_semantic_store(event_bus: EventBus | None = None) -> SemanticStore:
 
 def _make_episodic_store(event_bus: EventBus | None = None) -> EpisodicStore:
     return EpisodicStore(event_bus=event_bus)
+
+
+def _make_media_store() -> MediaStore:
+    return MediaStore(config.MEDIA_STORAGE_PATH)
 
 
 def _make_retriever(event_bus: EventBus | None = None) -> UnifiedRetriever:
@@ -65,6 +71,7 @@ def cmd_store(args):
 def cmd_store_episode(args):
     bus = _make_bus()
     store = _make_episodic_store(event_bus=bus)
+    media_store = _make_media_store() if args.text is None else None
 
     if args.text is not None:
         record = EpisodicMemory(
@@ -72,17 +79,22 @@ def cmd_store_episode(args):
             session_id=args.session,
         )
     else:
-        media_ref = os.path.abspath(args.file)
-        content = args.content or _default_episode_content(media_ref, args.modality)
+        source_path = os.path.abspath(args.file)
         record = EpisodicMemory(
-            content=content,
+            content=args.content or _default_episode_content(source_path, args.modality),
             session_id=args.session,
             modality=args.modality,
-            media_ref=media_ref,
-            source_mime_type=_guess_mime_type(media_ref, args.modality),
+            source_mime_type=_guess_mime_type(source_path, args.modality),
         )
+        media_ref = media_store.store(source_path, record.id)
+        record.media_ref = media_ref
 
-    record_id = store.store(record)
+    try:
+        record_id = store.store(record)
+    except Exception:
+        if media_store is not None and record.media_ref:
+            media_store.delete(record.media_ref)
+        raise
     print(f"Stored episode [{record_id[:8]}]: {record.content}")
 
 

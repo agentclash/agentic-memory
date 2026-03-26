@@ -1,8 +1,10 @@
 """Verify the FastAPI boundary around the memory stores and retriever."""
 
 import os
+import shutil
 import sys
 import tempfile
+from pathlib import Path
 
 import httpx
 import pytest
@@ -10,15 +12,15 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.app import create_app
+from stores.episodic_store import EpisodicStoreError
 from tests.helpers import HashingEmbedder
 
 
-def make_client() -> httpx.AsyncClient:
+def make_client(*, media_root: str | None = None) -> httpx.AsyncClient:
     chroma_dir = tempfile.mkdtemp(prefix="memory_api_chroma_")
-    upload_dir = tempfile.mkdtemp(prefix="memory_api_uploads_")
     app = create_app(
         chroma_path=chroma_dir,
-        upload_dir=upload_dir,
+        media_root=media_root,
         allowed_origins=["http://localhost:3000"],
         embedder=HashingEmbedder(),
     )
@@ -44,57 +46,96 @@ async def test_store_semantic_and_query_mixed_results():
 
 @pytest.mark.anyio
 async def test_store_file_episode_and_temporal_queries():
-    async with make_client() as client:
-        response = await client.post(
-            "/api/memories/episodic/file",
-            data={
-                "session_id": "session-media",
-                "content": "Screenshot of a failed run",
-            },
-            files={"file": ("failure.png", b"fake-image", "image/png")},
-        )
-        record = response.json()["record"]
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    try:
+        async with make_client(media_root=media_root) as client:
+            response = await client.post(
+                "/api/memories/episodic/file",
+                data={
+                    "session_id": "session-media",
+                    "content": "Screenshot of a failed run",
+                },
+                files={"file": ("failure.png", b"fake-image", "image/png")},
+            )
+            record = response.json()["record"]
 
-        recent = await client.get("/api/episodes/recent", params={"n": 1})
-        session = await client.get("/api/episodes/session/session-media")
-        time_range = await client.get(
-            "/api/episodes/time-range",
-            params={
-                "start": "2026-01-01T00:00:00+00:00",
-                "end": "2030-01-01T00:00:00+00:00",
-            },
-        )
+            recent = await client.get("/api/episodes/recent", params={"n": 1})
+            session = await client.get("/api/episodes/session/session-media")
+            time_range = await client.get(
+                "/api/episodes/time-range",
+                params={
+                    "start": "2026-01-01T00:00:00+00:00",
+                    "end": "2030-01-01T00:00:00+00:00",
+                },
+            )
 
-    assert response.status_code == 200
-    assert record["modality"] == "image"
-    assert record["source_mime_type"] == "image/png"
-    assert record["media_ref"].endswith(".png")
-    assert recent.status_code == 200
-    assert session.status_code == 200
-    assert time_range.status_code == 200
-    assert recent.json()["records"][0]["memory_type"] == "episodic"
-    assert session.json()["records"][0]["session_id"] == "session-media"
-    assert time_range.json()["records"][0]["modality"] == "image"
+        assert response.status_code == 200
+        assert record["modality"] == "image"
+        assert record["source_mime_type"] == "image/png"
+        assert record["media_ref"] == os.path.join(media_root, "images", f"{record['id']}.png")
+        assert os.path.exists(record["media_ref"])
+        assert recent.status_code == 200
+        assert session.status_code == 200
+        assert time_range.status_code == 200
+        assert recent.json()["records"][0]["memory_type"] == "episodic"
+        assert session.json()["records"][0]["session_id"] == "session-media"
+        assert time_range.json()["records"][0]["modality"] == "image"
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
 
 
 @pytest.mark.anyio
-async def test_store_file_episode_inferrs_modality_from_extension_and_mime():
-    async with make_client() as client:
-        audio = await client.post(
-            "/api/memories/episodic/file",
-            data={"session_id": "session-audio"},
-            files={"file": ("clip.mp3", b"fake-audio", "audio/mpeg")},
-        )
-        pdf = await client.post(
-            "/api/memories/episodic/file",
-            data={"session_id": "session-pdf"},
-            files={"file": ("notes.pdf", b"%PDF-1.4\n%", "application/pdf")},
-        )
+async def test_store_file_episode_infers_modality_from_extension_and_mime():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    try:
+        async with make_client(media_root=media_root) as client:
+            audio = await client.post(
+                "/api/memories/episodic/file",
+                data={"session_id": "session-audio"},
+                files={"file": ("clip.mp3", b"fake-audio", "audio/mpeg")},
+            )
+            pdf = await client.post(
+                "/api/memories/episodic/file",
+                data={"session_id": "session-pdf"},
+                files={"file": ("notes.pdf", b"%PDF-1.4\n%", "application/pdf")},
+            )
 
-    assert audio.status_code == 200
-    assert pdf.status_code == 200
-    assert audio.json()["record"]["modality"] == "audio"
-    assert pdf.json()["record"]["modality"] == "pdf"
+        assert audio.status_code == 200
+        assert pdf.status_code == 200
+        assert audio.json()["record"]["modality"] == "audio"
+        assert pdf.json()["record"]["modality"] == "pdf"
+        assert audio.json()["record"]["media_ref"].endswith(
+            os.path.join("audio", f"{audio.json()['record']['id']}.mp3")
+        )
+        assert pdf.json()["record"]["media_ref"].endswith(
+            os.path.join("documents", f"{pdf.json()['record']['id']}.pdf")
+        )
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+
+
+@pytest.mark.anyio
+async def test_failed_file_episode_write_cleans_up_owned_media():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    try:
+        async with make_client(media_root=media_root) as client:
+            await client.get("/health")
+            service = client.app.state.service
+
+            def fail_store(record):
+                raise EpisodicStoreError("synthetic store failure")
+
+            service.episodic_store.store = fail_store
+            response = await client.post(
+                "/api/memories/episodic/file",
+                data={"session_id": "session-fail"},
+                files={"file": ("failure.png", b"fake-image", "image/png")},
+            )
+
+        assert response.status_code == 422
+        assert not any(path.is_file() for path in Path(media_root).rglob("*"))
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
 
 
 @pytest.mark.anyio

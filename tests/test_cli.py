@@ -7,12 +7,14 @@ import tempfile
 from contextlib import redirect_stderr, redirect_stdout
 from datetime import datetime, timezone
 from unittest.mock import patch
+from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from demo import cli
 from events.bus import EventBus
 from models.episodic import EpisodicMemory
+from stores.media_store import MediaStore
 
 
 class RecordingStore:
@@ -22,6 +24,11 @@ class RecordingStore:
     def store(self, record):
         self.records.append(record)
         return record.id
+
+
+class FailingStore:
+    def store(self, record):
+        raise RuntimeError("synthetic store failure")
 
 
 class FakeRetriever:
@@ -77,32 +84,35 @@ def test_store_episode_file_cli_smoke():
         handle.write(b"fake-image")
 
     try:
-        with patch.object(cli, "_make_bus", return_value=EventBus()):
-            with patch.object(cli, "_make_episodic_store", return_value=store):
-                stdout, _ = run_cli(
-                    [
-                        "cli",
-                        "store-episode",
-                        "--session",
-                        "session-file",
-                        "--file",
-                        path,
-                        "--modality",
-                        "image",
-                        "--content",
-                        "Screenshot from the failed run",
-                    ]
-                )
+        with tempfile.TemporaryDirectory(prefix="cli_media_root_") as media_root:
+            with patch.object(cli, "_make_bus", return_value=EventBus()):
+                with patch.object(cli, "_make_episodic_store", return_value=store):
+                    with patch.object(cli, "_make_media_store", return_value=MediaStore(media_root)):
+                        stdout, _ = run_cli(
+                            [
+                                "cli",
+                                "store-episode",
+                                "--session",
+                                "session-file",
+                                "--file",
+                                path,
+                                "--modality",
+                                "image",
+                                "--content",
+                                "Screenshot from the failed run",
+                            ]
+                        )
 
-        assert "Stored episode [" in stdout
-        assert len(store.records) == 1
-        record = store.records[0]
-        assert record.content == "Screenshot from the failed run"
-        assert record.session_id == "session-file"
-        assert record.modality == "image"
-        assert record.media_ref == os.path.abspath(path)
-        assert record.source_mime_type == "image/png"
-        print("  PASS  CLI stores file-backed episodic memories with modality metadata")
+            assert "Stored episode [" in stdout
+            assert len(store.records) == 1
+            record = store.records[0]
+            assert record.content == "Screenshot from the failed run"
+            assert record.session_id == "session-file"
+            assert record.modality == "image"
+            assert record.media_ref == str(Path(media_root) / "images" / f"{record.id}.png")
+            assert Path(record.media_ref).read_bytes() == b"fake-image"
+            assert record.source_mime_type == "image/png"
+            print("  PASS  CLI copies file-backed episodic media into app-owned storage")
     finally:
         os.remove(path)
 
@@ -125,9 +135,45 @@ def test_recent_cli_smoke():
     print("  PASS  CLI prints recent episodic memories")
 
 
+def test_store_episode_file_cli_cleans_up_owned_media_on_failure():
+    store = FailingStore()
+    fd, path = tempfile.mkstemp(suffix=".png", prefix="cli_episode_")
+    os.close(fd)
+    with open(path, "wb") as handle:
+        handle.write(b"fake-image")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="cli_media_root_") as media_root:
+            with patch.object(cli, "_make_bus", return_value=EventBus()):
+                with patch.object(cli, "_make_episodic_store", return_value=store):
+                    with patch.object(cli, "_make_media_store", return_value=MediaStore(media_root)):
+                        try:
+                            run_cli(
+                                [
+                                    "cli",
+                                    "store-episode",
+                                    "--session",
+                                    "session-file",
+                                    "--file",
+                                    path,
+                                    "--modality",
+                                    "image",
+                                ]
+                            )
+                            raise AssertionError("Expected CLI store failure")
+                        except RuntimeError as exc:
+                            assert "synthetic store failure" in str(exc)
+
+            assert not any(file_path.is_file() for file_path in Path(media_root).rglob("*"))
+            print("  PASS  CLI cleans up owned media when store persistence fails")
+    finally:
+        os.remove(path)
+
+
 if __name__ == "__main__":
     print("CLI tests:\n")
     test_store_episode_text_cli_smoke()
     test_store_episode_file_cli_smoke()
     test_recent_cli_smoke()
+    test_store_episode_file_cli_cleans_up_owned_media_on_failure()
     print("\nAll tests passed.")
