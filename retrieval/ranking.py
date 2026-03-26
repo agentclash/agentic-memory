@@ -13,6 +13,9 @@ class RankedResult:
     final_score: float
 
 
+MIN_SPAN_SECONDS = 3600  # spans shorter than 1 hour are treated as "same time"
+
+
 def rank_results(
     results: list[tuple[MemoryRecord, float]],
     relevance_weight: float = 0.4,
@@ -48,8 +51,8 @@ def rank_results(
     max_age = max(ages)
     span = max_age - min_age
 
-    if span == 0:
-        # Single result, or all timestamps identical — no penalty
+    if span < MIN_SPAN_SECONDS:
+        # All results are effectively the same age — no recency penalty
         recency_scores = [1.0] * len(results)
     else:
         # min_age → 1.0 (newest), max_age → 0.0 (oldest)
