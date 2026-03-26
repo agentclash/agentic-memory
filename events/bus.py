@@ -11,13 +11,13 @@ from typing import Any, Callable, Mapping
 def _freeze(value: Any) -> Any:
     """Recursively freeze event payloads so subscribers see an immutable snapshot."""
     if isinstance(value, dict):
-        return MappingProxyType({key: _freeze(val) for key, val in deepcopy(value).items()})
+        return MappingProxyType({key: _freeze(val) for key, val in value.items()})
     if isinstance(value, list):
-        return tuple(_freeze(item) for item in deepcopy(value))
+        return tuple(_freeze(item) for item in value)
     if isinstance(value, tuple):
-        return tuple(_freeze(item) for item in deepcopy(value))
+        return tuple(_freeze(item) for item in value)
     if isinstance(value, set):
-        return frozenset(_freeze(item) for item in deepcopy(value))
+        return frozenset(_freeze(item) for item in value)
     return deepcopy(value)
 
 

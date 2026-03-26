@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+from typing import Any
 
 from events.bus import EventBus
 from stores.base import BaseStore
@@ -18,7 +19,7 @@ class UnifiedRetriever:
         self._stores = stores
         self._event_bus = event_bus
 
-    def _emit_event(self, event_type: str, data: dict) -> None:
+    def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
         if self._event_bus is not None:
             self._event_bus.emit(event_type, data)
 

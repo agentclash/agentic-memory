@@ -1,7 +1,14 @@
 from google import genai
 from google.genai import types
+from typing import Protocol
 
 from config import GEMINI_API_KEY, EMBEDDING_MODEL, EMBEDDING_DIMENSIONS
+
+
+class TextEmbedder(Protocol):
+    def embed_text(self, text: str) -> list[float]: ...
+
+    def embed_query(self, text: str) -> list[float]: ...
 
 
 class GeminiEmbedder:

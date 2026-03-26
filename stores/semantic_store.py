@@ -5,7 +5,7 @@ import config
 from events.bus import EventBus
 from models.semantic import SemanticMemory
 from stores.base import BaseStore
-from utils.embeddings import GeminiEmbedder
+from utils.embeddings import GeminiEmbedder, TextEmbedder
 
 
 class SemanticStore(BaseStore):
@@ -14,7 +14,7 @@ class SemanticStore(BaseStore):
     def __init__(
         self,
         event_bus: EventBus | None = None,
-        embedder: GeminiEmbedder | None = None,
+        embedder: TextEmbedder | None = None,
     ):
         super().__init__(event_bus=event_bus)
         client = chromadb.PersistentClient(path=config.CHROMA_DB_PATH)
