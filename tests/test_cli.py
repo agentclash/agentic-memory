@@ -26,6 +26,11 @@ class RecordingStore:
         return record.id
 
 
+class FailingStore:
+    def store(self, record):
+        raise RuntimeError("synthetic store failure")
+
+
 class FakeRetriever:
     def __init__(self, recent_records=None):
         self.recent_records = recent_records or []
@@ -130,9 +135,45 @@ def test_recent_cli_smoke():
     print("  PASS  CLI prints recent episodic memories")
 
 
+def test_store_episode_file_cli_cleans_up_owned_media_on_failure():
+    store = FailingStore()
+    fd, path = tempfile.mkstemp(suffix=".png", prefix="cli_episode_")
+    os.close(fd)
+    with open(path, "wb") as handle:
+        handle.write(b"fake-image")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="cli_media_root_") as media_root:
+            with patch.object(cli, "_make_bus", return_value=EventBus()):
+                with patch.object(cli, "_make_episodic_store", return_value=store):
+                    with patch.object(cli, "_make_media_store", return_value=MediaStore(media_root)):
+                        try:
+                            run_cli(
+                                [
+                                    "cli",
+                                    "store-episode",
+                                    "--session",
+                                    "session-file",
+                                    "--file",
+                                    path,
+                                    "--modality",
+                                    "image",
+                                ]
+                            )
+                            raise AssertionError("Expected CLI store failure")
+                        except RuntimeError as exc:
+                            assert "synthetic store failure" in str(exc)
+
+            assert not any(file_path.is_file() for file_path in Path(media_root).rglob("*"))
+            print("  PASS  CLI cleans up owned media when store persistence fails")
+    finally:
+        os.remove(path)
+
+
 if __name__ == "__main__":
     print("CLI tests:\n")
     test_store_episode_text_cli_smoke()
     test_store_episode_file_cli_smoke()
     test_recent_cli_smoke()
+    test_store_episode_file_cli_cleans_up_owned_media_on_failure()
     print("\nAll tests passed.")

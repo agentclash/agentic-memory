@@ -184,7 +184,6 @@ class MemoryAPIService:
 def create_app(
     *,
     chroma_path: str | None = None,
-    upload_dir: str | None = None,
     media_root: str | None = None,
     allowed_origins: list[str] | None = None,
     embedder: TextEmbedder | None = None,
@@ -200,7 +199,7 @@ def create_app(
     app.state.service = None
     app.state.service_config = {
         "chroma_path": chroma_path,
-        "media_root": Path(media_root or upload_dir) if (media_root or upload_dir) else None,
+        "media_root": Path(media_root) if media_root else None,
         "embedder": embedder,
     }
 
@@ -282,8 +281,10 @@ def create_app(
         try:
             service().episodic_store.store(record)
         except MediaTooLargeError as exc:
+            service().media_store.delete(media_ref)
             raise HTTPException(status_code=413, detail=str(exc)) from exc
         except EpisodicStoreError as exc:
+            service().media_store.delete(media_ref)
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"record": _serialise_record(record)}
 

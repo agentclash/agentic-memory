@@ -71,6 +71,7 @@ def cmd_store(args):
 def cmd_store_episode(args):
     bus = _make_bus()
     store = _make_episodic_store(event_bus=bus)
+    media_store = _make_media_store() if args.text is None else None
 
     if args.text is not None:
         record = EpisodicMemory(
@@ -85,10 +86,15 @@ def cmd_store_episode(args):
             modality=args.modality,
             source_mime_type=_guess_mime_type(source_path, args.modality),
         )
-        media_ref = _make_media_store().store(source_path, record.id)
+        media_ref = media_store.store(source_path, record.id)
         record.media_ref = media_ref
 
-    record_id = store.store(record)
+    try:
+        record_id = store.store(record)
+    except Exception:
+        if media_store is not None and record.media_ref:
+            media_store.delete(record.media_ref)
+        raise
     print(f"Stored episode [{record_id[:8]}]: {record.content}")
 
 

@@ -33,6 +33,7 @@ class MediaStore:
     def __init__(self, base_path: str | Path):
         self._base_path = Path(base_path)
         self._base_path.mkdir(parents=True, exist_ok=True)
+        self._base_path_resolved = self._base_path.resolve()
 
     def store(self, source_path: str | Path, memory_id: str) -> str:
         source = Path(source_path)
@@ -47,19 +48,21 @@ class MediaStore:
         return str(target)
 
     def store_bytes(self, data: bytes, filename: str, memory_id: str) -> str:
+        if not data:
+            raise ValueError("Cannot store empty media payload")
         target = self._target_path(filename, memory_id)
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_bytes(data)
         return str(target)
 
     def retrieve(self, media_ref: str | Path) -> str:
-        path = Path(media_ref)
+        path = self._validate_owned(media_ref)
         if not path.exists():
             raise FileNotFoundError(f"Stored media not found: {path}")
         return str(path)
 
     def delete(self, media_ref: str | Path) -> None:
-        path = Path(media_ref)
+        path = self._validate_owned(media_ref)
         if not path.exists():
             return
         if not path.is_file():
@@ -70,6 +73,12 @@ class MediaStore:
         suffix = Path(filename).suffix.lower()
         directory = self._media_directory(filename)
         return self._base_path / directory / f"{memory_id}{suffix}"
+
+    def _validate_owned(self, path: str | Path) -> Path:
+        resolved = Path(path).resolve()
+        if not resolved.is_relative_to(self._base_path_resolved):
+            raise ValueError(f"Path is not under media store root: {path}")
+        return resolved
 
     def _media_directory(self, filename: str) -> str:
         suffix = Path(filename).suffix.lower()

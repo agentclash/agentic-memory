@@ -3,6 +3,7 @@
 import os
 import sys
 import tempfile
+from pathlib import Path
 
 import httpx
 import pytest
@@ -10,15 +11,15 @@ import pytest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from api.app import create_app
+from stores.episodic_store import EpisodicStoreError
 from tests.helpers import HashingEmbedder
 
 
-def make_client() -> httpx.AsyncClient:
+def make_client(*, media_root: str | None = None) -> httpx.AsyncClient:
     chroma_dir = tempfile.mkdtemp(prefix="memory_api_chroma_")
-    upload_dir = tempfile.mkdtemp(prefix="memory_api_uploads_")
     app = create_app(
         chroma_path=chroma_dir,
-        upload_dir=upload_dir,
+        media_root=media_root,
         allowed_origins=["http://localhost:3000"],
         embedder=HashingEmbedder(),
     )
@@ -45,8 +46,7 @@ async def test_store_semantic_and_query_mixed_results():
 @pytest.mark.anyio
 async def test_store_file_episode_and_temporal_queries():
     media_root = tempfile.mkdtemp(prefix="memory_api_media_")
-    async with make_client() as client:
-        client.app.state.service_config["media_root"] = media_root
+    async with make_client(media_root=media_root) as client:
         response = await client.post(
             "/api/memories/episodic/file",
             data={
@@ -81,10 +81,9 @@ async def test_store_file_episode_and_temporal_queries():
 
 
 @pytest.mark.anyio
-async def test_store_file_episode_inferrs_modality_from_extension_and_mime():
+async def test_store_file_episode_infers_modality_from_extension_and_mime():
     media_root = tempfile.mkdtemp(prefix="memory_api_media_")
-    async with make_client() as client:
-        client.app.state.service_config["media_root"] = media_root
+    async with make_client(media_root=media_root) as client:
         audio = await client.post(
             "/api/memories/episodic/file",
             data={"session_id": "session-audio"},
@@ -102,6 +101,27 @@ async def test_store_file_episode_inferrs_modality_from_extension_and_mime():
     assert pdf.json()["record"]["modality"] == "pdf"
     assert audio.json()["record"]["media_ref"].endswith(f"/audio/{audio.json()['record']['id']}.mp3")
     assert pdf.json()["record"]["media_ref"].endswith(f"/documents/{pdf.json()['record']['id']}.pdf")
+
+
+@pytest.mark.anyio
+async def test_failed_file_episode_write_cleans_up_owned_media():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    async with make_client(media_root=media_root) as client:
+        await client.get("/health")
+        service = client.app.state.service
+
+        def fail_store(record):
+            raise EpisodicStoreError("synthetic store failure")
+
+        service.episodic_store.store = fail_store
+        response = await client.post(
+            "/api/memories/episodic/file",
+            data={"session_id": "session-fail"},
+            files={"file": ("failure.png", b"fake-image", "image/png")},
+        )
+
+    assert response.status_code == 422
+    assert not any(path.is_file() for path in Path(media_root).rglob("*"))
 
 
 @pytest.mark.anyio
