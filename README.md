@@ -267,6 +267,29 @@ python experiments/audio_emotion_probe.py "song.mp3"
 
 ---
 
+## Offline Evaluation
+
+The repo now includes a deterministic offline episodic-memory evaluation harness
+for fixed synthetic fixtures across mixed-store retrieval, temporal recall,
+session reconstruction, recent-event lookup, and cross-modal media-backed
+episodes.
+
+Run it with:
+
+```bash
+pytest tests/test_offline_episodic_eval.py
+```
+
+or:
+
+```bash
+python tests/test_offline_episodic_eval.py
+```
+
+Benchmark mapping and rationale: [`docs/offline_episodic_eval.md`](docs/offline_episodic_eval.md)
+
+---
+
 ## Theoretical Foundation
 
 This project is built on the cognitive taxonomy from the DeepMind paper *Measuring Progress Toward AGI*. The paper distinguishes three faculties that most agent frameworks conflate:

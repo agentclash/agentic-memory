@@ -45,6 +45,17 @@ class HashingEmbedder:
         return [value / norm for value in vector]
 
 
+class DeterministicMultimodalEmbedder(HashingEmbedder):
+    """Test stub that keeps media bytes and text queries in the same token space."""
+
+    def embed_bytes(self, data: bytes, mime_type: str) -> list[float]:
+        try:
+            payload = data.decode("utf-8")
+        except UnicodeDecodeError:
+            payload = hashlib.sha256(data).hexdigest()
+        return self._embed(f"{mime_type} {payload}")
+
+
 def make_temp_chroma_dir(prefix: str) -> str:
     return tempfile.mkdtemp(prefix=prefix)
 
