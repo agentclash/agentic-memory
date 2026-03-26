@@ -181,9 +181,27 @@ def test_get_by_session_orders_by_turn_number_then_created_at():
 
 def test_get_by_session_filters_across_sessions():
     store, _ = fresh_setup()
-    store.store(EpisodicMemory(content="alpha event", session_id="session-alpha"))
-    store.store(EpisodicMemory(content="beta event", session_id="session-beta"))
-    store.store(EpisodicMemory(content="alpha follow-up", session_id="session-alpha"))
+    store.store(
+        EpisodicMemory(
+            content="alpha event",
+            session_id="session-alpha",
+            created_at=datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
+        )
+    )
+    store.store(
+        EpisodicMemory(
+            content="beta event",
+            session_id="session-beta",
+            created_at=datetime(2026, 1, 1, 12, 1, tzinfo=timezone.utc),
+        )
+    )
+    store.store(
+        EpisodicMemory(
+            content="alpha follow-up",
+            session_id="session-alpha",
+            created_at=datetime(2026, 1, 1, 12, 2, tzinfo=timezone.utc),
+        )
+    )
 
     results = store.get_by_session("session-alpha")
 

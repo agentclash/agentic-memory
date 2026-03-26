@@ -1,5 +1,6 @@
 import json
 from datetime import datetime, timezone
+from heapq import nlargest
 from pathlib import Path
 
 import chromadb
@@ -104,19 +105,21 @@ class EpisodicStore(BaseStore):
 
     def get_by_session(self, session_id: str) -> list[EpisodicMemory]:
         """Return all episodic records for a session, ordered by turn then created_at."""
-        records = [record for record in self._all_records() if record.session_id == session_id]
+        records = self._all_records(
+            where={"session_id": session_id},
+            include_embeddings=False,
+        )
         return sorted(records, key=self._session_sort_key)
 
     def get_recent(self, n: int) -> list[EpisodicMemory]:
         """Return the most recent episodic records across sessions, newest first."""
         if n <= 0:
             return []
-        records = sorted(
-            self._all_records(),
+        return nlargest(
+            n,
+            self._all_records(include_embeddings=False),
             key=lambda record: self._as_utc(record.created_at),
-            reverse=True,
         )
-        return records[:n]
 
     def get_by_time_range(
         self,
@@ -135,7 +138,7 @@ class EpisodicStore(BaseStore):
 
         records = [
             record
-            for record in self._all_records()
+            for record in self._all_records(include_embeddings=False)
             if start_utc <= self._as_utc(record.created_at) <= end_utc
         ]
         return sorted(records, key=lambda record: self._as_utc(record.created_at))
@@ -216,9 +219,19 @@ class EpisodicStore(BaseStore):
             "source_mime_type": record.source_mime_type or "",
         }
 
-    def _all_records(self) -> list[EpisodicMemory]:
+    def _all_records(
+        self,
+        *,
+        where: dict | None = None,
+        include_embeddings: bool = True,
+    ) -> list[EpisodicMemory]:
+        include = ["documents", "metadatas"]
+        if include_embeddings:
+            include.insert(0, "embeddings")
+
         result = self._collection.get(
-            include=["embeddings", "documents", "metadatas"],
+            where=where,
+            include=include,
         )
         if not result["ids"]:
             return []
@@ -264,10 +277,11 @@ class EpisodicStore(BaseStore):
         )
 
     def _from_result(self, result: dict, index: int) -> EpisodicMemory:
+        embeddings = result.get("embeddings")
         return self._build_record(
             result["documents"][index],
             result["ids"][index],
-            result["embeddings"][index],
+            embeddings[index] if embeddings is not None else None,
             result["metadatas"][index],
         )
 
