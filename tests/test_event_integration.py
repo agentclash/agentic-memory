@@ -2,6 +2,7 @@
 
 import os
 import sys
+import tempfile
 from dataclasses import replace
 from datetime import datetime, timezone, timedelta
 
@@ -9,9 +10,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
 from events.bus import EventBus
+from models.episodic import EpisodicMemory
 from models.semantic import SemanticMemory
 from retrieval.retriever import UnifiedRetriever
 from stores.base import BaseStore
+from stores.episodic_store import EpisodicStore
 from stores.semantic_store import SemanticStore
 from tests.helpers import HashingEmbedder, cleanup_dir, make_temp_chroma_dir
 
@@ -24,10 +27,19 @@ class EventRecorder:
 
 
 class FakeStore(BaseStore):
-    def __init__(self, memory_type: str, results: list[tuple[SemanticMemory, float]]):
+    def __init__(
+        self,
+        memory_type: str,
+        results: list[tuple[SemanticMemory, float]],
+        *,
+        recent_records=None,
+        ranged_records=None,
+    ):
         super().__init__()
         self._memory_type = memory_type
         self._results = results
+        self._recent_records = recent_records or []
+        self._ranged_records = ranged_records or []
         self.updated_ids = []
 
     def store(self, record):
@@ -45,6 +57,20 @@ class FakeStore(BaseStore):
 
     def update_access(self, record_id: str) -> None:
         self.updated_ids.append(record_id)
+
+    def get_recent(self, n: int):
+        return self._recent_records[:n]
+
+    def get_by_time_range(self, start, end):
+        return list(self._ranged_records)
+
+
+def make_media_file(suffix: str, data: bytes) -> str:
+    fd, path = tempfile.mkstemp(suffix=suffix, prefix="episodic_event_media_")
+    os.close(fd)
+    with open(path, "wb") as handle:
+        handle.write(data)
+    return path
 
 
 def test_semantic_store_emits_memory_stored():
@@ -101,6 +127,41 @@ def test_semantic_store_does_not_emit_when_write_fails():
     finally:
         config.CHROMA_DB_PATH = original_db_path
         cleanup_dir(db_path)
+
+
+def test_episodic_store_emits_media_context_in_memory_stored():
+    db_path = make_temp_chroma_dir("chroma_test_event_episodic_")
+    media_path = make_media_file(".png", b"episodic-image")
+    original_db_path = config.CHROMA_DB_PATH
+    config.CHROMA_DB_PATH = db_path
+
+    try:
+        bus = EventBus()
+        recorder = EventRecorder(bus, "memory.stored")
+        store = EpisodicStore(event_bus=bus, embedder=HashingEmbedder())
+        record = EpisodicMemory(
+            content="Screenshot of a failed build",
+            session_id="session-media",
+            modality="image",
+            media_ref=media_path,
+            source_mime_type="image/png",
+        )
+
+        store.store(record)
+
+        assert len(recorder.events) == 1
+        event = recorder.events[0]
+        assert event.data["memory_type"] == "episodic"
+        assert event.data["modality"] == "image"
+        assert event.data["media_ref"] == media_path
+        print("  PASS  EpisodicStore emits modality and media_ref for stored media episodes")
+    finally:
+        config.CHROMA_DB_PATH = original_db_path
+        cleanup_dir(db_path)
+        try:
+            os.remove(media_path)
+        except FileNotFoundError:
+            pass
 
 
 def test_retriever_emits_retrieved_ranked_and_accessed():
@@ -189,11 +250,55 @@ def test_retriever_reports_filtered_memory_types():
     print("  PASS  memory_types filter is reflected in memory.retrieved")
 
 
+def test_retriever_temporal_queries_emit_and_access_episodic_context():
+    now = datetime.now(timezone.utc)
+    episode = EpisodicMemory(
+        content="Episode with media context",
+        session_id="session-direct",
+        modality="image",
+        media_ref="/tmp/example.png",
+        created_at=now,
+    )
+
+    episodic_store = FakeStore(
+        "episodic",
+        [],
+        recent_records=[episode],
+        ranged_records=[episode],
+    )
+    bus = EventBus()
+    recorder = EventRecorder(bus, "memory.retrieved", "memory.accessed")
+    retriever = UnifiedRetriever(stores={"episodic": episodic_store}, event_bus=bus)
+
+    recent = retriever.query_recent(1)
+    ranged = retriever.query_time_range(now - timedelta(minutes=1), now + timedelta(minutes=1))
+
+    assert [record.content for record in recent] == ["Episode with media context"]
+    assert [record.content for record in ranged] == ["Episode with media context"]
+    assert [event.event_type for event in recorder.events] == [
+        "memory.retrieved",
+        "memory.accessed",
+        "memory.retrieved",
+        "memory.accessed",
+    ]
+    assert recorder.events[0].data["query_type"] == "recent"
+    assert recorder.events[0].data["memory_types"] == ("episodic",)
+    assert recorder.events[1].data["memory_type"] == "episodic"
+    assert recorder.events[1].data["modality"] == "image"
+    assert recorder.events[1].data["media_ref"] == "/tmp/example.png"
+    assert recorder.events[2].data["query_type"] == "time_range"
+    assert recorder.events[3].data["access_count"] == 2
+    assert episodic_store.updated_ids == [episode.id, episode.id]
+    print("  PASS  direct episodic retriever queries emit retrieval and access context")
+
+
 if __name__ == "__main__":
     print("Event integration tests:\n")
     test_semantic_store_emits_memory_stored()
     test_semantic_store_does_not_emit_when_write_fails()
+    test_episodic_store_emits_media_context_in_memory_stored()
     test_retriever_emits_retrieved_ranked_and_accessed()
     test_retriever_emits_empty_summary_without_access_events()
     test_retriever_reports_filtered_memory_types()
+    test_retriever_temporal_queries_emit_and_access_episodic_context()
     print("\nAll tests passed.")

@@ -73,6 +73,7 @@ class EpisodicStore(BaseStore):
                 "modality": record.modality,
                 "importance": record.importance,
                 "session_id": record.session_id,
+                **({"media_ref": record.media_ref} if record.media_ref else {}),
             },
         )
         return record.id

@@ -2,6 +2,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from events.bus import EventBus
+from models.base import MemoryRecord
 from stores.base import BaseStore
 from retrieval.ranking import RankedResult, rank_results
 
@@ -22,6 +23,35 @@ class UnifiedRetriever:
     def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
         if self._event_bus is not None:
             self._event_bus.emit(event_type, data)
+
+    def _emit_accessed(self, record: MemoryRecord) -> None:
+        payload = {
+            "record_id": record.id,
+            "memory_type": record.memory_type,
+            "access_count": record.access_count,
+            "modality": record.modality,
+        }
+        if record.media_ref:
+            payload["media_ref"] = record.media_ref
+        self._emit_event("memory.accessed", payload)
+
+    def _touch_records(self, records: list[MemoryRecord]) -> list[MemoryRecord]:
+        now = datetime.now(timezone.utc)
+        for record in records:
+            store = self._stores.get(record.memory_type)
+            if store is None:
+                continue
+            store.update_access(record.id)
+            record.access_count += 1
+            record.last_accessed_at = now
+            self._emit_accessed(record)
+        return records
+
+    def _get_episodic_store(self):
+        store = self._stores.get("episodic")
+        if store is None:
+            return None
+        return store
 
     def query(
         self,
@@ -90,21 +120,45 @@ class UnifiedRetriever:
         )
 
         # ── update access tracking on returned records ──────────────────────
-        now = datetime.now(timezone.utc)
-        for r in final:
-            store = self._stores.get(r.record.memory_type)
-            if store:
-                store.update_access(r.record.id)
-                # Keep in-memory record in sync so callers see current values
-                r.record.access_count += 1
-                r.record.last_accessed_at = now
-                self._emit_event(
-                    "memory.accessed",
-                    {
-                        "record_id": r.record.id,
-                        "memory_type": r.record.memory_type,
-                        "access_count": r.record.access_count,
-                    },
-                )
+        self._touch_records([r.record for r in final])
 
         return final
+
+    def query_recent(self, n: int) -> list[MemoryRecord]:
+        store = self._get_episodic_store()
+        records = []
+        if store is not None and hasattr(store, "get_recent"):
+            records = list(store.get_recent(n))
+
+        self._emit_event(
+            "memory.retrieved",
+            {
+                "query": "recent",
+                "query_type": "recent",
+                "memory_types": ["episodic"],
+                "candidate_count": len(records),
+                "top_similarity": None,
+                "limit": n,
+            },
+        )
+        return self._touch_records(records)
+
+    def query_time_range(self, start: datetime, end: datetime) -> list[MemoryRecord]:
+        store = self._get_episodic_store()
+        records = []
+        if store is not None and hasattr(store, "get_by_time_range"):
+            records = list(store.get_by_time_range(start, end))
+
+        self._emit_event(
+            "memory.retrieved",
+            {
+                "query": "time_range",
+                "query_type": "time_range",
+                "memory_types": ["episodic"],
+                "candidate_count": len(records),
+                "top_similarity": None,
+                "start": start.isoformat(),
+                "end": end.isoformat(),
+            },
+        )
+        return self._touch_records(records)

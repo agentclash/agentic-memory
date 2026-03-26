@@ -44,6 +44,7 @@ class SemanticStore(BaseStore):
                 "content": record.content,
                 "modality": record.modality,
                 "importance": record.importance,
+                **({"media_ref": record.media_ref} if record.media_ref else {}),
             },
         )
         return record.id
