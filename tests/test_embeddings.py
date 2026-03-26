@@ -176,6 +176,24 @@ def test_embed_audio_requires_ffmpeg_when_chunking():
             assert "ffmpeg" in str(exc)
 
 
+def test_probe_duration_requires_ffprobe():
+    embedder = RecordingGeminiEmbedder()
+    embedder._probe_duration_seconds = GeminiEmbedder._probe_duration_seconds.__get__(
+        embedder, RecordingGeminiEmbedder
+    )
+    embedder._require_binary = lambda name: (_ for _ in ()).throw(
+        RuntimeError(f"{name} is required for audio/video chunking but was not found")
+    )
+    with tempfile.NamedTemporaryFile(suffix=".mp3") as handle:
+        handle.write(b"audio")
+        handle.flush()
+        try:
+            embedder._probe_duration_seconds(Path(handle.name))
+            raise AssertionError("Expected missing ffprobe to fail")
+        except RuntimeError as exc:
+            assert "ffprobe" in str(exc)
+
+
 def test_embed_image_rejects_unsupported_mime():
     embedder = RecordingGeminiEmbedder()
     with tempfile.NamedTemporaryFile(suffix=".gif") as handle:
@@ -224,6 +242,7 @@ if __name__ == "__main__":
     test_embed_video_chunks_long_media_and_renormalizes_average()
     test_embed_multimodal_audio_chunks_with_text_and_image_context()
     test_embed_audio_requires_ffmpeg_when_chunking()
+    test_probe_duration_requires_ffprobe()
     test_embed_image_rejects_unsupported_mime()
     test_embed_bytes_rejects_unsupported_mime()
     test_chunking_rejects_runaway_chunk_counts()
