@@ -2,21 +2,27 @@ import chromadb
 from datetime import datetime, timezone
 
 import config
+from events.bus import EventBus
 from models.semantic import SemanticMemory
 from stores.base import BaseStore
-from utils.embeddings import GeminiEmbedder
+from utils.embeddings import GeminiEmbedder, TextEmbedder
 
 
 class SemanticStore(BaseStore):
     """ChromaDB-backed store for semantic (factual) memories."""
 
-    def __init__(self):
+    def __init__(
+        self,
+        event_bus: EventBus | None = None,
+        embedder: TextEmbedder | None = None,
+    ):
+        super().__init__(event_bus=event_bus)
         client = chromadb.PersistentClient(path=config.CHROMA_DB_PATH)
         self._collection = client.get_or_create_collection(
             name="semantic_memories",
             metadata={"hnsw:space": "cosine"},
         )
-        self._embedder = GeminiEmbedder()
+        self._embedder = embedder or GeminiEmbedder()
 
     # ── write ──────────────────────────────────────────────────────────────
 
@@ -29,6 +35,16 @@ class SemanticStore(BaseStore):
             embeddings=[embedding],
             documents=[record.content],
             metadatas=[self._to_metadata(record)],
+        )
+        self._emit_event(
+            "memory.stored",
+            {
+                "record_id": record.id,
+                "memory_type": record.memory_type,
+                "content": record.content,
+                "modality": record.modality,
+                "importance": record.importance,
+            },
         )
         return record.id
 

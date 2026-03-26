@@ -1,10 +1,19 @@
 from abc import ABC, abstractmethod
+from typing import Any
 
+from events.bus import EventBus
 from models.base import MemoryRecord
 
 
 class BaseStore(ABC):
     """All memory stores implement this interface — semantic, episodic, procedural."""
+
+    def __init__(self, event_bus: EventBus | None = None):
+        self._event_bus = event_bus
+
+    def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
+        if self._event_bus is not None:
+            self._event_bus.emit(event_type, data)
 
     @abstractmethod
     def store(self, record: MemoryRecord) -> str:
