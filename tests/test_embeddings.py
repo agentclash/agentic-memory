@@ -58,6 +58,8 @@ class RecordingGeminiEmbedder(GeminiEmbedder):
     def _probe_duration_seconds(self, path: Path) -> float:
         if path.name.endswith(".long.mp3"):
             return 180.0
+        if path.name.endswith(".long.mov"):
+            return 180.0
         return 10.0
 
     def _require_binary(self, name: str) -> None:
@@ -118,6 +120,47 @@ def test_embed_audio_chunks_long_media_and_renormalizes_average():
     assert math.isclose(_norm(vector), 1.0, rel_tol=1e-9)
 
 
+def test_embed_video_chunks_long_media_and_renormalizes_average():
+    embedder = RecordingGeminiEmbedder()
+    with tempfile.NamedTemporaryFile(suffix=".long.mov") as handle:
+        handle.write(b"long-video")
+        handle.flush()
+
+        vector = embedder.embed_video(handle.name, description="incident video", mime_type="video/quicktime")
+
+    assert len(embedder.calls) == 3
+    assert embedder.chunk_payloads == ["chunk-0", "chunk-1", "chunk-2"]
+    assert len(vector) == EMBEDDING_DIMENSIONS
+    assert math.isclose(_norm(vector), 1.0, rel_tol=1e-9)
+
+
+def test_embed_multimodal_audio_chunks_with_text_and_image_context():
+    embedder = RecordingGeminiEmbedder()
+    with tempfile.NamedTemporaryFile(suffix=".png") as image_handle, tempfile.NamedTemporaryFile(
+        suffix=".long.mp3"
+    ) as audio_handle:
+        image_handle.write(b"context-image")
+        image_handle.flush()
+        audio_handle.write(b"long-audio")
+        audio_handle.flush()
+
+        vector = embedder.embed_multimodal(
+            text="deployment incident",
+            image=image_handle.name,
+            image_mime_type="image/png",
+            audio=audio_handle.name,
+            audio_mime_type="audio/mpeg",
+        )
+
+    assert len(embedder.calls) == 3
+    first_parts = embedder.calls[0][0][0]["parts"]
+    assert first_parts[0] == {"type": "text", "text": "deployment incident"}
+    assert first_parts[1]["mime_type"] == "image/png"
+    assert first_parts[2]["data"] == b"chunk-0"
+    assert len(vector) == EMBEDDING_DIMENSIONS
+    assert math.isclose(_norm(vector), 1.0, rel_tol=1e-9)
+
+
 def test_embed_audio_requires_ffmpeg_when_chunking():
     embedder = RecordingGeminiEmbedder()
     embedder._require_binary = lambda name: (_ for _ in ()).throw(
@@ -145,9 +188,42 @@ def test_embed_image_rejects_unsupported_mime():
             assert "Unsupported image MIME type" in str(exc)
 
 
+def test_embed_bytes_rejects_unsupported_mime():
+    embedder = RecordingGeminiEmbedder()
+    try:
+        embedder.embed_bytes(b"bytes", "application/octet-stream")
+        raise AssertionError("Expected unsupported MIME to fail")
+    except ValueError as exc:
+        assert "Unsupported MIME type" in str(exc)
+
+
+def test_chunking_rejects_runaway_chunk_counts():
+    embedder = RecordingGeminiEmbedder()
+    embedder._write_media_chunks = GeminiEmbedder._write_media_chunks.__get__(embedder, RecordingGeminiEmbedder)
+    with tempfile.NamedTemporaryFile(suffix=".long.mp3") as handle, tempfile.TemporaryDirectory(
+        prefix="embed_chunks_"
+    ) as chunk_dir:
+        handle.write(b"long-audio")
+        handle.flush()
+        try:
+            embedder._write_media_chunks(
+                path=Path(handle.name),
+                temp_dir=Path(chunk_dir),
+                max_chunk_seconds=1.0,
+                duration_seconds=500.0,
+            )
+            raise AssertionError("Expected excessive chunk count to fail")
+        except ValueError as exc:
+            assert "too many chunks" in str(exc)
+
+
 if __name__ == "__main__":
     test_embed_text_normalizes_to_unit_length()
     test_embed_multimodal_aggregates_text_and_image_into_one_embedding()
     test_embed_audio_chunks_long_media_and_renormalizes_average()
+    test_embed_video_chunks_long_media_and_renormalizes_average()
+    test_embed_multimodal_audio_chunks_with_text_and_image_context()
     test_embed_audio_requires_ffmpeg_when_chunking()
     test_embed_image_rejects_unsupported_mime()
+    test_embed_bytes_rejects_unsupported_mime()
+    test_chunking_rejects_runaway_chunk_counts()

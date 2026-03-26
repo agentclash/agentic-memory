@@ -19,6 +19,7 @@ _MEDIA_LIMIT_SECONDS = {
     "audio": 80.0,
     "video": 120.0,
 }
+_MAX_MEDIA_CHUNKS = 32
 
 _DEFAULT_MIME_TYPES = {
     "image": "image/png",
@@ -45,6 +46,7 @@ class GeminiEmbedder:
     """Converts text and local media into Gemini embedding vectors."""
 
     def __init__(self):
+        self._genai = None
         self._client = None
         self._types = None
         self._doc_config = None
@@ -105,11 +107,18 @@ class GeminiEmbedder:
         video_mime_type: str | None = None,
         pdf_mime_type: str | None = None,
     ) -> list[float]:
+        """Return a single embedding across the provided parts.
+
+        Text is appended as a normal content part. If audio or video is present,
+        that modality still flows through the same chunking path as the dedicated
+        media entrypoints, with the text/image/pdf parts carried along in
+        `base_parts` for each chunk embedding.
+        """
         base_parts = self._text_parts(text)
         if image is not None:
-            base_parts.append(self._media_part(image, "image", image_mime_type))
+            base_parts.append(self._media_part(image, modality="image", resolved_mime=image_mime_type))
         if pdf is not None:
-            base_parts.append(self._media_part(pdf, "pdf", pdf_mime_type))
+            base_parts.append(self._media_part(pdf, modality="pdf", resolved_mime=pdf_mime_type))
 
         chunked = []
         if audio is not None:
@@ -146,19 +155,25 @@ class GeminiEmbedder:
         parts.extend(self._text_parts(description))
 
         if isinstance(source, bytes):
-            parts.append(self._media_part(source, modality, mime_type))
+            parts.append(
+                self._media_part(
+                    source,
+                    modality=modality,
+                    resolved_mime=self._resolve_inline_mime_type(modality, mime_type),
+                )
+            )
             return self._embed_parts(parts, self._document_config())
 
         path = Path(source)
         resolved_mime = self._resolve_mime_type(path, modality, mime_type)
         chunk_limit = _MEDIA_LIMIT_SECONDS.get(modality)
         if chunk_limit is None:
-            parts.append(self._media_part(path, modality, resolved_mime))
+            parts.append(self._media_part(path, modality=modality, resolved_mime=resolved_mime))
             return self._embed_parts(parts, self._document_config())
 
         duration_seconds = self._probe_duration_seconds(path)
         if duration_seconds <= chunk_limit:
-            parts.append(self._media_part(path, modality, resolved_mime))
+            parts.append(self._media_part(path, modality=modality, resolved_mime=resolved_mime))
             return self._embed_parts(parts, self._document_config())
 
         self._require_binary("ffmpeg")
@@ -171,7 +186,7 @@ class GeminiEmbedder:
             )
             vectors = [
                 self._embed_parts(
-                    [*parts, self._media_part(chunk_path, modality, resolved_mime)],
+                    [*parts, self._media_part(chunk_path, modality=modality, resolved_mime=resolved_mime)],
                     self._document_config(),
                 )
                 for chunk_path in chunk_paths
@@ -179,17 +194,27 @@ class GeminiEmbedder:
         return self._average_vectors(vectors)
 
     def _text_parts(self, text: str | None) -> list[Any]:
-        if not text:
+        if text is None:
             return []
         return [self._make_text_part(text)]
 
-    def _media_part(self, source: str | Path | bytes, modality: str, mime_type: str | None) -> Any:
+    def _media_part(
+        self,
+        source: str | Path | bytes,
+        *,
+        modality: str,
+        resolved_mime: str | None = None,
+    ) -> Any:
         if isinstance(source, bytes):
-            resolved_mime = self._resolve_inline_mime_type(modality, mime_type)
+            if resolved_mime is None:
+                resolved_mime = self._resolve_inline_mime_type(modality, None)
             return self._make_bytes_part(source, resolved_mime)
 
         path = Path(source)
-        resolved_mime = self._resolve_mime_type(path, modality, mime_type)
+        if resolved_mime is None:
+            resolved_mime = self._resolve_mime_type(path, modality, None)
+        # The Gemini embeddings API accepts bytes/parts here rather than a streaming
+        # file handle, so local paths are materialized into memory before upload.
         return self._make_bytes_part(self._read_media_bytes(path), resolved_mime)
 
     def _embed_parts(self, parts: list[Any], config: Any) -> list[float]:
@@ -299,6 +324,15 @@ class GeminiEmbedder:
         max_chunk_seconds: float,
         duration_seconds: float,
     ) -> list[Path]:
+        chunk_count = max(1, math.ceil(duration_seconds / max_chunk_seconds))
+        if chunk_count > _MAX_MEDIA_CHUNKS:
+            raise ValueError(
+                "Refusing to embed media with too many chunks: "
+                f"modality_limit_seconds={max_chunk_seconds} "
+                f"duration_seconds={duration_seconds:.3f} "
+                f"chunk_count={chunk_count} max_chunks={_MAX_MEDIA_CHUNKS} path={path}"
+            )
+
         chunk_paths = []
         start_seconds = 0.0
         chunk_index = 0
@@ -396,10 +430,8 @@ class GeminiEmbedder:
         return types.Content(parts=parts)
 
     def _load_sdk(self):
-        if self._types is not None:
-            from google import genai
-
-            return genai, self._types
+        if self._genai is not None and self._types is not None:
+            return self._genai, self._types
 
         try:
             from google import genai
@@ -409,5 +441,6 @@ class GeminiEmbedder:
                 "google-genai is required to use GeminiEmbedder. Install dependencies from requirements.txt."
             ) from exc
 
+        self._genai = genai
         self._types = types
-        return genai, types
+        return self._genai, self._types
