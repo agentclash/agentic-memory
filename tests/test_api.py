@@ -49,7 +49,6 @@ async def test_store_file_episode_and_temporal_queries():
             "/api/memories/episodic/file",
             data={
                 "session_id": "session-media",
-                "modality": "image",
                 "content": "Screenshot of a failed run",
             },
             files={"file": ("failure.png", b"fake-image", "image/png")},
@@ -76,6 +75,26 @@ async def test_store_file_episode_and_temporal_queries():
     assert recent.json()["records"][0]["memory_type"] == "episodic"
     assert session.json()["records"][0]["session_id"] == "session-media"
     assert time_range.json()["records"][0]["modality"] == "image"
+
+
+@pytest.mark.anyio
+async def test_store_file_episode_inferrs_modality_from_extension_and_mime():
+    async with make_client() as client:
+        audio = await client.post(
+            "/api/memories/episodic/file",
+            data={"session_id": "session-audio"},
+            files={"file": ("clip.mp3", b"fake-audio", "audio/mpeg")},
+        )
+        pdf = await client.post(
+            "/api/memories/episodic/file",
+            data={"session_id": "session-pdf"},
+            files={"file": ("notes.pdf", b"%PDF-1.4\n%", "application/pdf")},
+        )
+
+    assert audio.status_code == 200
+    assert pdf.status_code == 200
+    assert audio.json()["record"]["modality"] == "audio"
+    assert pdf.json()["record"]["modality"] == "pdf"
 
 
 @pytest.mark.anyio

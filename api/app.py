@@ -20,7 +20,7 @@ from models.base import MemoryRecord
 from models.episodic import EpisodicMemory
 from models.semantic import SemanticMemory
 from retrieval.retriever import UnifiedRetriever
-from stores.episodic_store import EpisodicStore
+from stores.episodic_store import EpisodicStore, EpisodicStoreError, MediaTooLargeError
 from stores.semantic_store import SemanticStore
 from utils.embeddings import TextEmbedder
 
@@ -30,6 +30,7 @@ DEFAULT_ALLOWED_ORIGINS = [
 ]
 
 DEFAULT_UPLOAD_DIR = Path(os.getenv("MEMORY_UPLOAD_DIR", "/tmp/agentic-memory-uploads"))
+_SUPPORTED_MEDIA_MODALITIES = {"audio", "image", "video", "pdf"}
 
 
 def _normalise_origins(origins: list[str] | None = None) -> list[str]:
@@ -49,6 +50,30 @@ def _jsonable(value: Any) -> Any:
     if isinstance(value, datetime):
         return value.isoformat()
     return value
+
+
+def _infer_media_modality(*, mime_type: str | None, filename: str | None) -> str | None:
+    guessed_mime = mime_type or mimetypes.guess_type(filename or "")[0]
+    if guessed_mime:
+        if guessed_mime.startswith("image/"):
+            return "image"
+        if guessed_mime.startswith("audio/"):
+            return "audio"
+        if guessed_mime.startswith("video/"):
+            return "video"
+        if guessed_mime == "application/pdf":
+            return "pdf"
+
+    suffix = Path(filename or "").suffix.lower()
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
+        return "image"
+    if suffix in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}:
+        return "audio"
+    if suffix in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
+        return "video"
+    if suffix == ".pdf":
+        return "pdf"
+    return None
 
 
 def _serialise_record(record: MemoryRecord) -> dict[str, Any]:
@@ -231,27 +256,37 @@ def create_app(
     @app.post("/api/memories/episodic/file")
     async def create_file_episode(
         session_id: str = Form(...),
-        modality: str = Form(...),
+        modality: str | None = Form(default=None),
         content: str | None = Form(default=None),
         turn_number: int | None = Form(default=None),
         summary: str | None = Form(default=None),
         importance: float = Form(default=0.5),
         file: UploadFile = File(...),
     ) -> dict[str, Any]:
-        if modality not in {"audio", "image", "video", "pdf"}:
-            raise HTTPException(status_code=400, detail="invalid modality")
         media_ref, mime_type = service().save_upload(file)
+        inferred_modality = _infer_media_modality(mime_type=mime_type, filename=file.filename)
+        resolved_modality = inferred_modality or modality
+        if resolved_modality not in _SUPPORTED_MEDIA_MODALITIES:
+            raise HTTPException(
+                status_code=400,
+                detail="could not infer a supported modality from the uploaded file",
+            )
         record = EpisodicMemory(
-            content=content or f"{modality} episode from {file.filename}",
+            content=content or f"{resolved_modality} episode from {file.filename}",
             session_id=session_id,
-            modality=modality,
+            modality=resolved_modality,
             media_ref=media_ref,
             source_mime_type=mime_type,
             turn_number=turn_number,
             summary=summary,
             importance=importance,
         )
-        service().episodic_store.store(record)
+        try:
+            service().episodic_store.store(record)
+        except MediaTooLargeError as exc:
+            raise HTTPException(status_code=413, detail=str(exc)) from exc
+        except EpisodicStoreError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"record": _serialise_record(record)}
 
     @app.post("/api/retrieval/query")

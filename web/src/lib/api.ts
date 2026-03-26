@@ -86,14 +86,12 @@ export function createTextEpisode(input: {
 
 export async function createFileEpisode(input: {
   session_id: string;
-  modality: string;
   file: File;
   content?: string;
   summary?: string;
 }) {
   const formData = new FormData();
   formData.append("session_id", input.session_id);
-  formData.append("modality", input.modality);
   formData.append("file", input.file);
   if (input.content) formData.append("content", input.content);
   if (input.summary) formData.append("summary", input.summary);

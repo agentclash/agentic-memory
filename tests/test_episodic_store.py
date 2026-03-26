@@ -380,27 +380,22 @@ def test_media_provider_errors_are_wrapped_and_do_not_emit_event():
     store, _ = fresh_setup(event_bus=bus, embedder=FailingMediaEmbedder())
     media_path = make_media_file(".mp4", b"small-video")
 
-    try:
-        store.store(
-            EpisodicMemory(
-                content="Short video of a failed run",
-                session_id="session-video",
-                modality="video",
-                media_ref=media_path,
-                source_mime_type="video/mp4",
-            )
-        )
-        raise AssertionError("Expected provider failure to be wrapped")
-    except EpisodicStoreError as exc:
-        message = str(exc)
-        assert "Failed to embed episodic media record" in message
-        assert "modality=video" in message
-        assert exc.__cause__ is not None
-        assert str(exc.__cause__) == "provider rejected media payload"
+    record = EpisodicMemory(
+        content="Short video of a failed run",
+        session_id="session-video",
+        modality="video",
+        media_ref=media_path,
+        source_mime_type="video/mp4",
+    )
 
-    assert recorder.events == []
-    assert store.retrieve("failed run", top_k=5) == []
-    print("  PASS  provider failures surface as contextual store errors")
+    record_id = store.store(record)
+    loaded = store.get_by_id(record_id)
+
+    assert loaded is not None
+    assert loaded.metadata["embedding_strategy"] == "text_fallback"
+    assert "provider rejected media payload" in loaded.metadata["media_embed_error"]
+    assert len(recorder.events) == 1
+    print("  PASS  provider failures fall back to text embedding and still persist the record")
 
 
 def cleanup():

@@ -182,10 +182,22 @@ class EpisodicStore(BaseStore):
         try:
             return embed_method(media_bytes, mime_type=mime_type)
         except Exception as exc:
-            raise EpisodicStoreError(
-                "Failed to embed episodic media record: "
-                f"modality={record.modality} path={record.media_ref} mime_type={mime_type}"
-            ) from exc
+            # Some provider/media combinations are rejected even though the file is valid.
+            # Preserve the record by falling back to text embedding instead of failing the write.
+            try:
+                fallback = self._embedder.embed_text(self._fallback_text(record))
+            except Exception as fallback_exc:
+                raise EpisodicStoreError(
+                    "Failed to embed episodic media record: "
+                    f"modality={record.modality} path={record.media_ref} mime_type={mime_type}"
+                ) from fallback_exc
+
+            record.metadata = {
+                **record.metadata,
+                "embedding_strategy": "text_fallback",
+                "media_embed_error": str(exc),
+            }
+            return fallback
 
     def _fallback_text(self, record: EpisodicMemory) -> str:
         parts = [record.content]

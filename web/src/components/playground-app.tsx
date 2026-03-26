@@ -326,7 +326,6 @@ export function PlaygroundApp() {
   const [episodeText, setEpisodeText] = useState("");
   const [episodeContent, setEpisodeContent] = useState("");
   const [episodeSummary, setEpisodeSummary] = useState("");
-  const [episodeModality, setEpisodeModality] = useState("image");
   const [episodeFile, setEpisodeFile] = useState<File | null>(null);
   const [queryText, setQueryText] = useState("retrieval");
   const [recentCount, setRecentCount] = useState("5");
@@ -408,7 +407,6 @@ export function PlaygroundApp() {
         const result = await withBusy("Uploading file-backed episode", () =>
           createFileEpisode({
             session_id: episodeSession.trim(),
-            modality: episodeModality,
             file: episodeFile,
             content: episodeContent.trim() || undefined,
             summary: episodeSummary.trim() || undefined,
@@ -565,19 +563,7 @@ export function PlaygroundApp() {
                     />
                   </FormField>
                 ) : (
-                  <div className="grid gap-4 sm:grid-cols-2">
-                    <FormField label="Modality">
-                      <select
-                        className={textInputClass()}
-                        value={episodeModality}
-                        onChange={(event) => setEpisodeModality(event.target.value)}
-                      >
-                        <option value="image">image</option>
-                        <option value="audio">audio</option>
-                        <option value="video">video</option>
-                        <option value="pdf">pdf</option>
-                      </select>
-                    </FormField>
+                  <div className="grid gap-4">
                     <FormField label="File">
                       <input
                         className={`${textInputClass()} pt-3`}
@@ -585,16 +571,14 @@ export function PlaygroundApp() {
                         onChange={(event) => setEpisodeFile(event.target.files?.[0] ?? null)}
                       />
                     </FormField>
-                    <div className="sm:col-span-2">
-                      <FormField label="Content label">
-                        <input
-                          className={textInputClass()}
-                          placeholder="Optional human-readable description"
-                          value={episodeContent}
-                          onChange={(event) => setEpisodeContent(event.target.value)}
-                        />
-                      </FormField>
-                    </div>
+                    <FormField label="Content label">
+                      <input
+                        className={textInputClass()}
+                        placeholder="Optional human-readable description"
+                        value={episodeContent}
+                        onChange={(event) => setEpisodeContent(event.target.value)}
+                      />
+                    </FormField>
                   </div>
                 )}
 
@@ -606,7 +590,7 @@ export function PlaygroundApp() {
                     onChange={(event) => setEpisodeSummary(event.target.value)}
                   />
                 </FormField>
-                <MicroCopy>Use file-backed mode for image, audio, video, and PDF episodes through the real media path.</MicroCopy>
+                <MicroCopy>Use file-backed mode for image, audio, video, and PDF episodes. Modality is inferred from the upload.</MicroCopy>
 
                 <PrimaryButton type="submit" disabled={busyLabel !== null}>
                   <FileUp className="size-4" />
