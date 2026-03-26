@@ -4,24 +4,36 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from events import ConsoleLogger, EventBus
 from models.semantic import SemanticMemory
 from stores.semantic_store import SemanticStore
 from retrieval.retriever import UnifiedRetriever
 
 
-def _make_retriever() -> UnifiedRetriever:
-    return UnifiedRetriever(stores={"semantic": SemanticStore()})
+def _make_bus() -> EventBus:
+    bus = EventBus()
+    ConsoleLogger().register(bus)
+    return bus
+
+
+def _make_retriever(event_bus: EventBus | None = None) -> UnifiedRetriever:
+    return UnifiedRetriever(
+        stores={"semantic": SemanticStore(event_bus=event_bus)},
+        event_bus=event_bus,
+    )
 
 
 def cmd_store(args):
-    store = SemanticStore()
+    bus = _make_bus()
+    store = SemanticStore(event_bus=bus)
     record = SemanticMemory(content=args.content)
     record_id = store.store(record)
     print(f"Stored [{record_id[:8]}]: {args.content}")
 
 
 def cmd_query(args):
-    retriever = _make_retriever()
+    bus = _make_bus()
+    retriever = _make_retriever(event_bus=bus)
     results = retriever.query(args.query, top_k=args.top_k)
     if not results:
         print("No results found.")

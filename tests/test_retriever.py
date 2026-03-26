@@ -2,26 +2,26 @@
 
 import sys
 import os
+import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import shutil
+import config
 from models.semantic import SemanticMemory
 from stores.semantic_store import SemanticStore
 from retrieval.retriever import UnifiedRetriever
+from tests.helpers import HashingEmbedder
 
-TEST_DB_BASE = "./chroma_test_retriever"
-_test_counter = 0
+_DB_PATHS = []
 
 
 def fresh_setup():
-    global _test_counter
-    _test_counter += 1
-    db_path = f"{TEST_DB_BASE}_{_test_counter}"
+    db_path = tempfile.mkdtemp(prefix="chroma_test_retriever_")
+    _DB_PATHS.append(db_path)
     shutil.rmtree(db_path, ignore_errors=True)
-    import config
     config.CHROMA_DB_PATH = db_path
-    store = SemanticStore()
+    store = SemanticStore(embedder=HashingEmbedder())
     retriever = UnifiedRetriever(stores={"semantic": store})
     return store, retriever, db_path
 
@@ -37,7 +37,9 @@ def test_ranked_retrieval():
     assert results[0].record.content == "Python was created by Guido van Rossum", (
         f"Expected Python fact first, got: {results[0].record.content}"
     )
-    assert results[0].raw_similarity > 0.8, f"Expected similarity > 0.8, got {results[0].raw_similarity}"
+    assert results[0].raw_similarity > results[1].raw_similarity, (
+        "Expected the best match to score above the runner-up"
+    )
     print(f"  PASS  correct fact ranks first (sim={results[0].raw_similarity:.4f})")
 
 
@@ -69,7 +71,7 @@ def test_access_persists_across_instances():
     # Create fresh store + retriever (simulates process restart)
     import config
     config.CHROMA_DB_PATH = db_path
-    store2 = SemanticStore()
+    store2 = SemanticStore(embedder=HashingEmbedder())
     retriever2 = UnifiedRetriever(stores={"semantic": store2})
 
     results = retriever2.query("Who created Go?", top_k=1)
@@ -105,8 +107,7 @@ def test_over_fetch():
 
 
 def cleanup():
-    import glob
-    for d in glob.glob(f"{TEST_DB_BASE}*"):
+    for d in _DB_PATHS:
         shutil.rmtree(d, ignore_errors=True)
 
 
