@@ -22,6 +22,9 @@ def retry_with_exponential_backoff(
     if max_attempts < 1:
         raise ValueError("max_attempts must be at least 1")
 
+    # This helper is sync because the Gemini SDK call sites are sync today.
+    # If embedding moves onto the async request path directly, wrap the full
+    # operation in a threadpool rather than swapping this helper to async.
     delay = initial_delay_seconds
     for attempt in range(1, max_attempts + 1):
         try:

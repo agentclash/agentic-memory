@@ -250,6 +250,22 @@ async def test_semantic_memory_requires_media_ref_for_non_text_modalities():
 
 
 @pytest.mark.anyio
+async def test_semantic_memory_rejects_modality_media_type_mismatch():
+    async with make_client() as client:
+        response = await client.post(
+            "/api/memories/semantic",
+            json={
+                "content": "Bad semantic modality contract",
+                "modality": "image",
+                "media_ref": "clip.mp3",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "media_type 'audio' does not match modality 'image'"
+
+
+@pytest.mark.anyio
 async def test_semantic_memory_rejects_invalid_related_ids():
     async with make_client() as client:
         response = await client.post(

@@ -12,9 +12,35 @@ from typing import Any, Protocol
 from config import EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, GEMINI_API_KEY
 from utils.retry import retry_with_exponential_backoff
 
-_IMAGE_MIME_TYPES = {"image/jpeg", "image/png"}
-_AUDIO_MIME_TYPES = {"audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave"}
-_VIDEO_MIME_TYPES = {"video/mp4", "video/quicktime"}
+_IMAGE_MIME_TYPES = {
+    "image/jpeg",
+    "image/png",
+    "image/webp",
+    "image/heic",
+    "image/heif",
+}
+_AUDIO_MIME_TYPES = {
+    "audio/mpeg",
+    "audio/mp3",
+    "audio/wav",
+    "audio/x-wav",
+    "audio/wave",
+    "audio/aiff",
+    "audio/x-aiff",
+    "audio/aac",
+    "audio/flac",
+    "audio/ogg",
+}
+_VIDEO_MIME_TYPES = {
+    "video/mp4",
+    "video/mpeg",
+    "video/quicktime",
+    "video/x-msvideo",
+    "video/x-flv",
+    "video/webm",
+    "video/x-ms-wmv",
+    "video/3gpp",
+}
 _PDF_MIME_TYPES = {"application/pdf"}
 
 _MEDIA_LIMIT_SECONDS = {

@@ -56,21 +56,41 @@ def _jsonable(value: Any) -> Any:
 def _infer_media_contract(*, mime_type: str | None, filename: str | None) -> tuple[str, str] | None:
     guessed_mime = mime_type or mimetypes.guess_type(filename or "")[0]
     if guessed_mime:
-        if guessed_mime.startswith("image/"):
+        if guessed_mime in {"image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"}:
             return "image", "image"
-        if guessed_mime.startswith("audio/"):
+        if guessed_mime in {
+            "audio/mpeg",
+            "audio/mp3",
+            "audio/wav",
+            "audio/x-wav",
+            "audio/wave",
+            "audio/aiff",
+            "audio/x-aiff",
+            "audio/aac",
+            "audio/flac",
+            "audio/ogg",
+        }:
             return "audio", "audio"
-        if guessed_mime.startswith("video/"):
+        if guessed_mime in {
+            "video/mp4",
+            "video/mpeg",
+            "video/quicktime",
+            "video/x-msvideo",
+            "video/x-flv",
+            "video/webm",
+            "video/x-ms-wmv",
+            "video/3gpp",
+        }:
             return "video", "video"
         if guessed_mime == "application/pdf":
             return "multimodal", "pdf"
 
     suffix = Path(filename or "").suffix.lower()
-    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"}:
         return "image", "image"
-    if suffix in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}:
+    if suffix in {".mp3", ".wav", ".aif", ".aiff", ".aac", ".flac", ".ogg"}:
         return "audio", "audio"
-    if suffix in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
+    if suffix in {".mp4", ".mpeg", ".mpg", ".mov", ".avi", ".flv", ".webm", ".wmv", ".3gp"}:
         return "video", "video"
     if suffix == ".pdf":
         return "multimodal", "pdf"
@@ -300,6 +320,14 @@ def create_app(
                 raise ValueError("media_ref is required when modality is not text")
             if resolved_modality == "multimodal" and media_type is None:
                 raise ValueError("multimodal semantic memory requires a supported media_type")
+            if (
+                resolved_modality in {"image", "audio", "video"}
+                and media_type is not None
+                and media_type != resolved_modality
+            ):
+                raise ValueError(
+                    f"media_type '{media_type}' does not match modality '{resolved_modality}'"
+                )
             related_ids = _validate_related_ids(payload.get("related_ids"))
             record = SemanticMemory(
                 content=payload["content"],
