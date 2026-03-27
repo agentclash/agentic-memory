@@ -1,5 +1,6 @@
 import chromadb
 import json
+import mimetypes
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -158,26 +159,29 @@ class SemanticStore(BaseStore):
 
         media_path = self._require_media_path(record)
         text_context = self._text_context(record)
+        media_type = self._resolve_multimodal_media_type(record, media_path)
 
-        if record.modality == "multimodal":
-            return self._embed_multimodal(record, media_path, text_context)
-
-        embed_method_name = f"embed_{record.modality}"
-        embed_method = getattr(self._embedder, embed_method_name, None)
-        if embed_method is None:
-            raise ValueError(f"Embedder does not support modality '{record.modality}'")
-        return embed_method(str(media_path), description=text_context or None, mime_type=None)
+        # Semantic media records always carry meaningful text context in `content`,
+        # so aggregate text + media into one vector rather than treating the media
+        # as an isolated payload.
+        return self._embed_multimodal(
+            media_type,
+            media_path,
+            text_context,
+            mime_type=self._resolve_mime_type(media_type, media_path),
+        )
 
     def _embed_multimodal(
         self,
-        record: SemanticMemory,
+        media_type: str,
         media_path: Path,
         text_context: str,
+        *,
+        mime_type: str | None = None,
     ) -> list[float]:
-        media_type = self._resolve_multimodal_media_type(record, media_path)
         kwargs = {"text": text_context or None}
         kwargs[media_type] = str(media_path)
-        kwargs[f"{media_type}_mime_type"] = None
+        kwargs[f"{media_type}_mime_type"] = mime_type
         return self._embedder.embed_multimodal(**kwargs)
 
     def _ensure_owned_media(self, record: SemanticMemory) -> str | None:
@@ -196,6 +200,19 @@ class SemanticStore(BaseStore):
 
     def _resolve_multimodal_media_type(self, record: SemanticMemory, media_path: Path) -> str:
         return MediaStore.resolve_media_type(media_path, record.media_type)
+
+    def _resolve_mime_type(self, media_type: str, media_path: Path) -> str | None:
+        guessed = mimetypes.guess_type(media_path.name)[0]
+        if guessed:
+            return guessed
+
+        defaults = {
+            "image": "image/png",
+            "audio": "audio/mpeg",
+            "video": "video/mp4",
+            "pdf": "application/pdf",
+        }
+        return defaults.get(media_type)
 
     def _text_context(self, record: SemanticMemory) -> str:
         parts = [record.content]

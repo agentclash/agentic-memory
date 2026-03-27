@@ -8,6 +8,7 @@ from pathlib import Path
 
 import httpx
 import pytest
+from google.genai import errors as genai_errors
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -408,6 +409,48 @@ async def test_bad_request_semantic_write_cleans_up_owned_media():
 
         assert response.status_code == 400
         assert response.json()["detail"] == "synthetic validation failure"
+        assert not any(path.is_file() for path in Path(media_root).rglob("*"))
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+        try:
+            os.remove(source_path)
+        except FileNotFoundError:
+            pass
+
+
+@pytest.mark.anyio
+async def test_semantic_provider_failure_returns_502_and_cleans_up_owned_media():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    fd, source_path = tempfile.mkstemp(suffix=".png", prefix="semantic_api_source_")
+    os.close(fd)
+    Path(source_path).write_bytes(b"semantic-image")
+    try:
+        async with make_client(media_root=media_root) as client:
+            await client.get("/api/overview")
+            service = client.app.state.service
+
+            def fail_store(record):
+                owned_ref = service.media_store.store(record.media_ref, record.id)
+                record.media_ref = owned_ref
+                raise genai_errors.ServerError(
+                    500,
+                    {"error": {"code": 500, "message": "Internal error encountered.", "status": "INTERNAL"}},
+                    None,
+                )
+
+            service.semantic_store.store = fail_store
+            response = await client.post(
+                "/api/memories/semantic",
+                json={
+                    "content": "This semantic write should fail with a provider error",
+                    "modality": "image",
+                    "media_ref": source_path,
+                    "media_type": "image",
+                },
+            )
+
+        assert response.status_code == 502
+        assert response.json()["detail"] == "Gemini embedding provider failed after retries"
         assert not any(path.is_file() for path in Path(media_root).rglob("*"))
     finally:
         shutil.rmtree(media_root, ignore_errors=True)

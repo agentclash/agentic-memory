@@ -23,15 +23,6 @@ class RecordingSemanticEmbedder(HashingEmbedder):
         super().__init__()
         self.calls = []
 
-    def embed_image(
-        self,
-        source: str,
-        description: str | None = None,
-        mime_type: str | None = "image/png",
-    ) -> list[float]:
-        self.calls.append(("image", source, description, mime_type))
-        return super().embed_image(source, description=description, mime_type=mime_type)
-
     def embed_multimodal(
         self,
         *,
@@ -145,13 +136,21 @@ def test_image_semantic_write_copies_media_and_uses_owned_path():
     assert Path(loaded.media_ref).read_bytes() == b"semantic-image"
     assert embedder.calls == [
         (
-            "image",
-            loaded.media_ref,
-            "Architecture diagram for the retrieval stack\nWhiteboard with retriever, ranker, and stores",
-            None,
+            "multimodal",
+            {
+                "text": "Architecture diagram for the retrieval stack\nWhiteboard with retriever, ranker, and stores",
+                "image": loaded.media_ref,
+                "audio": None,
+                "video": None,
+                "pdf": None,
+                "image_mime_type": "image/png",
+                "audio_mime_type": "audio/mpeg",
+                "video_mime_type": "video/mp4",
+                "pdf_mime_type": "application/pdf",
+            },
         )
     ]
-    print("  PASS  semantic image writes copy media and embed from the owned path")
+    print("  PASS  semantic image writes copy media and embed through the multimodal path")
 
 
 def test_multimodal_semantic_write_stores_one_vector_and_round_trips():
@@ -189,7 +188,7 @@ def test_multimodal_semantic_write_stores_one_vector_and_round_trips():
                 "image_mime_type": "image/png",
                 "audio_mime_type": "audio/mpeg",
                 "video_mime_type": "video/mp4",
-                "pdf_mime_type": None,
+                "pdf_mime_type": "application/pdf",
             },
         )
     ]

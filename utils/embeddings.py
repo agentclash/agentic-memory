@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import hashlib
+import logging
 import math
 import mimetypes
 import shutil
@@ -8,7 +10,10 @@ import tempfile
 from pathlib import Path
 from typing import Any, Protocol
 
+from google.genai import errors as genai_errors
+
 from config import EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, GEMINI_API_KEY
+from utils.retry import retry_with_exponential_backoff
 
 _IMAGE_MIME_TYPES = {"image/jpeg", "image/png"}
 _AUDIO_MIME_TYPES = {"audio/mpeg", "audio/mp3", "audio/wav", "audio/x-wav", "audio/wave"}
@@ -20,6 +25,8 @@ _MEDIA_LIMIT_SECONDS = {
     "video": 120.0,
 }
 _MAX_MEDIA_CHUNKS = 32
+_logger = logging.getLogger(__name__)
+_EMBED_RETRY_ATTEMPTS = 3
 
 _DEFAULT_MIME_TYPES = {
     "image": "image/png",
@@ -131,6 +138,19 @@ class GeminiEmbedder:
 
         if chunked:
             modality, source, explicit_mime = chunked[0]
+            self._log_multimodal_request(
+                text=text,
+                image=image,
+                audio=audio,
+                video=video,
+                pdf=pdf,
+                image_mime_type=image_mime_type,
+                audio_mime_type=audio_mime_type,
+                video_mime_type=video_mime_type,
+                pdf_mime_type=pdf_mime_type,
+                chunked_modality=modality,
+                chunked_source=source,
+            )
             return self._embed_media(
                 source,
                 modality=modality,
@@ -140,7 +160,64 @@ class GeminiEmbedder:
 
         if not base_parts:
             raise ValueError("embed_multimodal requires at least one text or media input")
+        self._log_multimodal_request(
+            text=text,
+            image=image,
+            audio=audio,
+            video=video,
+            pdf=pdf,
+            image_mime_type=image_mime_type,
+            audio_mime_type=audio_mime_type,
+            video_mime_type=video_mime_type,
+            pdf_mime_type=pdf_mime_type,
+        )
         return self._embed_parts(base_parts, self._document_config())
+
+    def _log_multimodal_request(
+        self,
+        *,
+        text: str | None,
+        image: str | Path | bytes | None,
+        audio: str | Path | bytes | None,
+        video: str | Path | bytes | None,
+        pdf: str | Path | bytes | None,
+        image_mime_type: str | None,
+        audio_mime_type: str | None,
+        video_mime_type: str | None,
+        pdf_mime_type: str | None,
+        chunked_modality: str | None = None,
+        chunked_source: str | Path | bytes | None = None,
+    ) -> None:
+        def _describe_source(source: str | Path | bytes | None) -> dict | None:
+            if source is None:
+                return None
+            if isinstance(source, bytes):
+                return {"kind": "bytes", "size": len(source)}
+            path = Path(source)
+            return {
+                "kind": "path",
+                "path": str(path),
+                "exists": path.exists(),
+                "suffix": path.suffix.lower(),
+                "size": path.stat().st_size if path.exists() else None,
+            }
+
+        _logger.warning(
+            "embed_multimodal request: text_len=%s image=%s image_mime=%s "
+            "audio=%s audio_mime=%s video=%s video_mime=%s pdf=%s pdf_mime=%s "
+            "chunked_modality=%s chunked_source=%s",
+            len(text) if text is not None else 0,
+            _describe_source(image),
+            image_mime_type,
+            _describe_source(audio),
+            audio_mime_type,
+            _describe_source(video),
+            video_mime_type,
+            _describe_source(pdf),
+            pdf_mime_type,
+            chunked_modality,
+            _describe_source(chunked_source),
+        )
 
     def _embed_media(
         self,
@@ -218,6 +295,7 @@ class GeminiEmbedder:
         return self._make_bytes_part(self._read_media_bytes(path), resolved_mime)
 
     def _embed_parts(self, parts: list[Any], config: Any) -> list[float]:
+        self._log_parts_summary(parts)
         content = self._make_content(parts)
         return self._embed([content], config)[0]
 
@@ -226,12 +304,74 @@ class GeminiEmbedder:
         return [self._normalize_vector(vector) for vector in vectors]
 
     def _embed_raw(self, contents: list[Any], config: Any) -> list[list[float]]:
-        result = self._client_obj().models.embed_content(
-            model=EMBEDDING_MODEL,
-            contents=contents,
-            config=config,
+        def _request() -> list[list[float]]:
+            result = self._client_obj().models.embed_content(
+                model=EMBEDDING_MODEL,
+                contents=contents,
+                config=config,
+            )
+            return [list(embedding.values) for embedding in result.embeddings]
+
+        def _should_retry(exc: Exception) -> bool:
+            if not isinstance(exc, genai_errors.ServerError):
+                return False
+            _logger.warning(
+                "Gemini embed_content returned %s; retrying with exponential backoff",
+                exc,
+            )
+            return True
+
+        # TODO: Gemini multimodal image embeddings sometimes return transient 500
+        # INTERNAL responses even for requests that succeed on retry. Keep this
+        # retry wrapper until provider stability improves or we have a more
+        # targeted transport-level workaround.
+        return retry_with_exponential_backoff(
+            _request,
+            should_retry=_should_retry,
+            max_attempts=_EMBED_RETRY_ATTEMPTS,
         )
-        return [list(embedding.values) for embedding in result.embeddings]
+
+    def _log_parts_summary(self, parts: list[Any]) -> None:
+        summary = []
+        for part in parts:
+            if isinstance(part, str):
+                summary.append(
+                    {
+                        "type": "text",
+                        "len": len(part),
+                        "sha16": hashlib.sha256(part.encode("utf-8")).hexdigest()[:16],
+                        "preview": part[:80],
+                    }
+                )
+                continue
+
+            if isinstance(part, dict) and "text" in part:
+                text = part["text"]
+                summary.append(
+                    {
+                        "type": "text",
+                        "len": len(text),
+                        "sha16": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
+                        "preview": text[:80],
+                    }
+                )
+                continue
+
+            if isinstance(part, dict) and "inline_data" in part:
+                inline = part["inline_data"]
+                data = inline.get("data", b"")
+                summary.append(
+                    {
+                        "type": "inline_data",
+                        "mime_type": inline.get("mime_type"),
+                        "size": len(data),
+                    }
+                )
+                continue
+
+            summary.append({"type": type(part).__name__})
+
+        _logger.warning("embed parts summary: %s", summary)
 
     def _normalize_vector(self, vector: list[float]) -> list[float]:
         if len(vector) != EMBEDDING_DIMENSIONS:

@@ -9,6 +9,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from google.genai import errors as genai_errors
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -323,6 +324,12 @@ def create_app(
         except (FileNotFoundError, ValueError) as exc:
             _cleanup_owned_media(active_service, record.media_ref)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except genai_errors.ServerError as exc:
+            _cleanup_owned_media(active_service, record.media_ref)
+            raise HTTPException(
+                status_code=502,
+                detail="Gemini embedding provider failed after retries",
+            ) from exc
         except Exception:
             _cleanup_owned_media(active_service, record.media_ref)
             raise
