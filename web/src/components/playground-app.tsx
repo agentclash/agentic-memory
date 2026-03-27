@@ -14,10 +14,13 @@ import {
   Database,
   FileUp,
   History,
+  Image,
   Layers3,
+  Music,
   RefreshCcw,
   Search,
   Signal,
+  Type,
   Zap,
 } from "lucide-react";
 import {
@@ -33,6 +36,8 @@ import {
   type MemoryRecord,
   type Overview,
   type PlaygroundEvent,
+  queryByAudio,
+  queryByImage,
   queryMemories,
   type RankedQueryResult,
 } from "@/lib/api";
@@ -45,6 +50,7 @@ type Notice = { tone: "ok" | "error"; text: string } | null;
 type SidebarTab = "store" | "explore";
 type StoreMode = "semantic" | "text" | "file";
 type ExploreMode = "recent" | "session" | "time";
+type QueryMode = "text" | "image" | "audio";
 
 /* ------------------------------------------------------------------ */
 /*  Constants                                                          */
@@ -499,7 +505,9 @@ export function PlaygroundApp() {
   const [epiFileContent, setEpiFileContent] = useState("");
 
   /* ---- query ---- */
+  const [queryMode, setQueryMode] = useState<QueryMode>("text");
   const [queryText, setQueryText] = useState("");
+  const [queryFile, setQueryFile] = useState<File | null>(null);
   const [topK, setTopK] = useState(6);
   const [queryTypeFilter, setQueryTypeFilter] = useState<"all" | "semantic" | "episodic">("all");
   const [queryResults, setQueryResults] = useState<RankedQueryResult[]>([]);
@@ -666,9 +674,29 @@ export function PlaygroundApp() {
     }
   }
 
+  async function runMediaQuery(file: File, modality: "image" | "audio") {
+    const queryFn = modality === "image" ? queryByImage : queryByAudio;
+    const result = await withBusy(`Searching by ${modality}`, () =>
+      queryFn({
+        file,
+        top_k: topK,
+        memory_types: queryTypeFilter === "all" ? undefined : [queryTypeFilter],
+      }),
+    );
+    if (result) {
+      setQueryResults(result.results);
+      setQuerySubmitted(true);
+      setNotice({ tone: "ok", text: `${result.results.length} results via ${modality}` });
+    }
+  }
+
   function handleQuery(e?: FormEvent) {
     e?.preventDefault();
-    void runQuery(queryText);
+    if (queryMode === "text") {
+      void runQuery(queryText);
+    } else if (queryFile) {
+      void runMediaQuery(queryFile, queryMode);
+    }
   }
 
   /* ================================================================ */
@@ -1042,57 +1070,116 @@ export function PlaygroundApp() {
         <main className="playground-main">
           {/* ---- Query bar (sticky) ---- */}
           <div className="query-bar sticky top-0 z-10 border-b border-[var(--border)] px-6 py-4">
-            <form className="flex items-center gap-3" onSubmit={handleQuery}>
-              <div className="relative flex-1">
-                <Search className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-[var(--text-4)]" />
-                <input
-                  className="field-input pl-10"
-                  placeholder="Query your memories..."
-                  value={queryText}
-                  onChange={(e) => setQueryText(e.target.value)}
-                />
-              </div>
-              <SubmitButton disabled={isBusy}>Search</SubmitButton>
-            </form>
-            <div className="mt-3 flex items-center gap-4">
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] uppercase tracking-wider text-[var(--text-4)]">
-                  top_k
-                </span>
-                <select
-                  value={topK}
-                  onChange={(e) => setTopK(parseInt(e.target.value, 10))}
-                  className="field-select"
+            <form className="space-y-3" onSubmit={handleQuery}>
+              {/* Mode toggle */}
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  onClick={() => { setQueryMode("text"); setQueryFile(null); }}
+                  className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium uppercase tracking-wider transition ${
+                    queryMode === "text"
+                      ? "bg-white/[0.08] text-[var(--text-1)]"
+                      : "text-[var(--text-4)] hover:bg-white/[0.03] hover:text-[var(--text-2)]"
+                  }`}
                 >
-                  {[3, 5, 6, 10, 15, 20].map((n) => (
-                    <option key={n} value={n}>
-                      {n}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className="flex items-center gap-2">
-                <span className="text-[10px] uppercase tracking-wider text-[var(--text-4)]">
-                  types
-                </span>
-                <select
-                  value={queryTypeFilter}
-                  onChange={(e) =>
-                    setQueryTypeFilter(e.target.value as "all" | "semantic" | "episodic")
-                  }
-                  className="field-select"
+                  <Type className="size-3" />
+                  Text
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setQueryMode("image"); setQueryText(""); }}
+                  className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium uppercase tracking-wider transition ${
+                    queryMode === "image"
+                      ? "bg-white/[0.08] text-[var(--text-1)]"
+                      : "text-[var(--text-4)] hover:bg-white/[0.03] hover:text-[var(--text-2)]"
+                  }`}
                 >
-                  <option value="all">all</option>
-                  <option value="semantic">semantic only</option>
-                  <option value="episodic">episodic only</option>
-                </select>
+                  <Image className="size-3" />
+                  Image
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { setQueryMode("audio"); setQueryText(""); }}
+                  className={`flex items-center gap-1.5 rounded-lg px-2.5 py-1.5 text-[11px] font-medium uppercase tracking-wider transition ${
+                    queryMode === "audio"
+                      ? "bg-white/[0.08] text-[var(--text-1)]"
+                      : "text-[var(--text-4)] hover:bg-white/[0.03] hover:text-[var(--text-2)]"
+                  }`}
+                >
+                  <Music className="size-3" />
+                  Audio
+                </button>
               </div>
-              {busyLabel && (
-                <span className="ml-auto animate-pulse text-[11px] text-[var(--text-4)]">
-                  {busyLabel}...
-                </span>
+
+              {/* Text input */}
+              {queryMode === "text" && (
+                <div className="flex items-center gap-3">
+                  <div className="relative flex-1">
+                    <Search className="absolute left-3.5 top-1/2 size-4 -translate-y-1/2 text-[var(--text-4)]" />
+                    <input
+                      className="field-input pl-10"
+                      placeholder="Query your memories..."
+                      value={queryText}
+                      onChange={(e) => setQueryText(e.target.value)}
+                    />
+                  </div>
+                  <SubmitButton disabled={isBusy}>Search</SubmitButton>
+                </div>
               )}
-            </div>
+
+              {/* Media file input */}
+              {queryMode !== "text" && (
+                <div className="flex items-center gap-3">
+                  <div className="flex-1">
+                    <FileDropZone file={queryFile} onFile={setQueryFile} />
+                  </div>
+                  <SubmitButton disabled={isBusy || !queryFile}>
+                    <Search className="size-3.5" />
+                    Search
+                  </SubmitButton>
+                </div>
+              )}
+
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] uppercase tracking-wider text-[var(--text-4)]">
+                    top_k
+                  </span>
+                  <select
+                    value={topK}
+                    onChange={(e) => setTopK(parseInt(e.target.value, 10))}
+                    className="field-select"
+                  >
+                    {[3, 5, 6, 10, 15, 20].map((n) => (
+                      <option key={n} value={n}>
+                        {n}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] uppercase tracking-wider text-[var(--text-4)]">
+                    types
+                  </span>
+                  <select
+                    value={queryTypeFilter}
+                    onChange={(e) =>
+                      setQueryTypeFilter(e.target.value as "all" | "semantic" | "episodic")
+                    }
+                    className="field-select"
+                  >
+                    <option value="all">all</option>
+                    <option value="semantic">semantic only</option>
+                    <option value="episodic">episodic only</option>
+                  </select>
+                </div>
+                {busyLabel && (
+                  <span className="ml-auto animate-pulse text-[11px] text-[var(--text-4)]">
+                    {busyLabel}...
+                  </span>
+                )}
+              </div>
+            </form>
           </div>
 
           {/* ---- Results area ---- */}

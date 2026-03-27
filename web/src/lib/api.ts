@@ -114,10 +114,40 @@ export async function createFileEpisode(input: {
   });
 }
 
+export type MediaQueryResult = {
+  query_type: "vector";
+  source_modality: string;
+  results: RankedQueryResult[];
+};
+
 export function queryMemories(input: { query: string; top_k?: number; memory_types?: string[] }) {
   return request<{ results: RankedQueryResult[] }>("/api/retrieval/query", {
     method: "POST",
     body: JSON.stringify(input),
+  });
+}
+
+export function queryByImage(input: { file: File; top_k?: number; memory_types?: string[] }) {
+  const formData = new FormData();
+  formData.append("file", input.file);
+  if (input.top_k !== undefined) formData.append("top_k", String(input.top_k));
+  if (input.memory_types?.length) formData.append("memory_types", input.memory_types.join(","));
+
+  return request<MediaQueryResult>("/api/retrieval/query-by-image", {
+    method: "POST",
+    body: formData,
+  });
+}
+
+export function queryByAudio(input: { file: File; top_k?: number; memory_types?: string[] }) {
+  const formData = new FormData();
+  formData.append("file", input.file);
+  if (input.top_k !== undefined) formData.append("top_k", String(input.top_k));
+  if (input.memory_types?.length) formData.append("memory_types", input.memory_types.join(","));
+
+  return request<MediaQueryResult>("/api/retrieval/query-by-audio", {
+    method: "POST",
+    body: formData,
   });
 }
 
