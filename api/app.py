@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import tempfile
 from collections import deque
 from collections.abc import Mapping
 from datetime import datetime
@@ -22,7 +23,7 @@ from retrieval.retriever import UnifiedRetriever
 from stores.episodic_store import EpisodicStore, EpisodicStoreError, MediaTooLargeError
 from stores.media_store import MediaStore
 from stores.semantic_store import SemanticStore
-from utils.embeddings import EmbeddingProviderError, TextEmbedder
+from utils.embeddings import EmbeddingProviderError, GeminiEmbedder, TextEmbedder
 
 DEFAULT_ALLOWED_ORIGINS = [
     "http://localhost:3000",
@@ -140,6 +141,22 @@ def _validate_related_ids(raw_related_ids: Any) -> list[str]:
     return related_ids
 
 
+def _parse_memory_types(raw_value: str | None) -> list[str] | None:
+    if raw_value is None:
+        return None
+    values = [value.strip() for value in raw_value.split(",") if value.strip()]
+    if not values:
+        return None
+
+    supported = {"semantic", "episodic"}
+    invalid = [value for value in values if value not in supported]
+    if invalid:
+        raise ValueError(
+            f"Unsupported memory_types {invalid}. Supported values: {', '.join(sorted(supported))}"
+        )
+    return values
+
+
 def _cleanup_owned_media(service: MemoryAPIService, media_ref: str | None) -> None:
     if media_ref and service.media_store.owns(media_ref):
         service.media_store.delete(media_ref)
@@ -225,18 +242,19 @@ class MemoryAPIService:
     ):
         self.media_store = MediaStore(media_root or DEFAULT_MEDIA_DIR)
         self.bus = EventBus()
+        self.embedder = embedder or GeminiEmbedder()
         original_chroma_path = config.CHROMA_DB_PATH
         try:
             if chroma_path is not None:
                 config.CHROMA_DB_PATH = chroma_path
             self.semantic_store = SemanticStore(
                 event_bus=self.bus,
-                embedder=embedder,
+                embedder=self.embedder,
                 media_store=self.media_store,
             )
             self.episodic_store = EpisodicStore(
                 event_bus=self.bus,
-                embedder=embedder,
+                embedder=self.embedder,
                 media_store=self.media_store,
             )
         finally:
@@ -253,6 +271,18 @@ class MemoryAPIService:
         filename = upload.filename or "upload.bin"
         media_ref = self.media_store.store_bytes(contents, filename, memory_id)
         return media_ref, guessed_mime
+
+    def save_query_upload(self, upload: UploadFile) -> tuple[str, str]:
+        guessed_mime = upload.content_type or mimetypes.guess_type(upload.filename or "")[0] or "application/octet-stream"
+        suffix = Path(upload.filename or "upload.bin").suffix
+        contents = upload.file.read()
+        handle = tempfile.NamedTemporaryFile(prefix="memory_query_", suffix=suffix, delete=False)
+        try:
+            handle.write(contents)
+            handle.flush()
+        finally:
+            handle.close()
+        return handle.name, guessed_mime
 
     def overview(self) -> dict[str, Any]:
         semantic_count = self.semantic_store._collection.count()
@@ -455,6 +485,74 @@ def create_app(
             memory_types=payload.get("memory_types"),
         )
         return {"results": [_serialise_ranked_result(result) for result in results]}
+
+    @app.post("/api/retrieval/query-by-image")
+    async def query_by_image(
+        file: UploadFile = File(...),
+        top_k: int = Form(default=5),
+        memory_types: str | None = Form(default=None),
+    ) -> dict[str, Any]:
+        active_service = service()
+        query_path = None
+        try:
+            parsed_memory_types = _parse_memory_types(memory_types)
+            query_path, mime_type = active_service.save_query_upload(file)
+            vector = active_service.embedder.embed_image(query_path, mime_type=mime_type)
+            results = active_service.retriever.query_by_vector(
+                vector,
+                top_k=top_k,
+                memory_types=parsed_memory_types,
+                metadata={"source_modality": "image"},
+            )
+            return {
+                "query_type": "vector",
+                "source_modality": "image",
+                "results": [_serialise_ranked_result(result) for result in results],
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except EmbeddingProviderError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Gemini embedding provider failed after retries",
+            ) from exc
+        finally:
+            if query_path and os.path.exists(query_path):
+                os.remove(query_path)
+
+    @app.post("/api/retrieval/query-by-audio")
+    async def query_by_audio(
+        file: UploadFile = File(...),
+        top_k: int = Form(default=5),
+        memory_types: str | None = Form(default=None),
+    ) -> dict[str, Any]:
+        active_service = service()
+        query_path = None
+        try:
+            parsed_memory_types = _parse_memory_types(memory_types)
+            query_path, mime_type = active_service.save_query_upload(file)
+            vector = active_service.embedder.embed_audio(query_path, mime_type=mime_type)
+            results = active_service.retriever.query_by_vector(
+                vector,
+                top_k=top_k,
+                memory_types=parsed_memory_types,
+                metadata={"source_modality": "audio"},
+            )
+            return {
+                "query_type": "vector",
+                "source_modality": "audio",
+                "results": [_serialise_ranked_result(result) for result in results],
+            }
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except EmbeddingProviderError as exc:
+            raise HTTPException(
+                status_code=502,
+                detail="Gemini embedding provider failed after retries",
+            ) from exc
+        finally:
+            if query_path and os.path.exists(query_path):
+                os.remove(query_path)
 
     @app.get("/api/episodes/recent")
     async def recent(n: int = Query(default=5, ge=1, le=50)) -> dict[str, Any]:

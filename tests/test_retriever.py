@@ -270,6 +270,33 @@ def test_query_by_vector_reuses_ranking_and_access_tracking():
     print("  PASS  query_by_vector reuses ranking and access tracking across stores")
 
 
+def test_joint_embedding_stores_one_vector_and_retrieves_by_image():
+    semantic_store, _, retriever, embedder, _ = fresh_vector_setup()
+    image_path = make_media_file(".png", b"architecture")
+    record = SemanticMemory(
+        content="Architecture whiteboard memory",
+        modality="image",
+        media_ref=image_path,
+        media_type="image",
+        text_description="system design diagram",
+    )
+
+    semantic_store.store(record)
+    raw = semantic_store._collection.get(ids=[record.id], include=["embeddings"])
+    vector = embedder.embed_image(image_path, mime_type="image/png")
+    results = retriever.query_by_vector(
+        vector,
+        top_k=1,
+        memory_types=["semantic"],
+        metadata={"source_modality": "image"},
+    )
+
+    assert len(raw["embeddings"]) == 1
+    assert len(results) == 1
+    assert results[0].record.id == record.id
+    print("  PASS  joint semantic embeddings store one vector and round-trip through image queries")
+
+
 def test_query_by_vector_rejects_wrong_dimensions_before_store_lookup():
     _, _, retriever, _, _ = fresh_vector_setup()
 
@@ -298,6 +325,7 @@ if __name__ == "__main__":
         test_query_recent_and_time_range_return_episodic_only()
         test_temporal_queries_update_episodic_access_counts()
         test_query_by_vector_reuses_ranking_and_access_tracking()
+        test_joint_embedding_stores_one_vector_and_retrieves_by_image()
         test_query_by_vector_rejects_wrong_dimensions_before_store_lookup()
         print("\nAll tests passed.")
     finally:

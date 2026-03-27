@@ -11,6 +11,7 @@ import pytest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+import config
 from api.app import create_app
 from models.base import normalize_modality
 from stores.episodic_store import EpisodicStoreError
@@ -24,7 +25,7 @@ def make_client(*, media_root: str | None = None) -> httpx.AsyncClient:
         chroma_path=chroma_dir,
         media_root=media_root,
         allowed_origins=["http://localhost:3000"],
-        embedder=HashingEmbedder(),
+        embedder=HashingEmbedder(dimensions=config.EMBEDDING_DIMENSIONS),
     )
     transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
@@ -46,6 +47,57 @@ async def test_store_semantic_and_query_mixed_results():
 
     assert response.status_code == 200
     assert {item["record"]["memory_type"] for item in data["results"]} == {"semantic", "episodic"}
+
+
+@pytest.mark.anyio
+async def test_text_query_finds_image_memory():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    fd, source_path = tempfile.mkstemp(suffix=".png", prefix="semantic_api_source_")
+    os.close(fd)
+    Path(source_path).write_bytes(b"diagram")
+    try:
+        async with make_client(media_root=media_root) as client:
+            create = await client.post(
+                "/api/memories/semantic",
+                json={
+                    "content": "image png architecture whiteboard",
+                    "modality": "image",
+                    "media_ref": source_path,
+                    "media_type": "image",
+                },
+            )
+            query = await client.post("/api/retrieval/query", json={"query": "architecture whiteboard", "top_k": 1})
+
+        assert create.status_code == 200
+        assert query.status_code == 200
+        assert query.json()["results"][0]["record"]["modality"] == "image"
+        print("  PASS  text retrieval can return image-backed memories")
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+        try:
+            os.remove(source_path)
+        except FileNotFoundError:
+            pass
+
+
+@pytest.mark.anyio
+async def test_text_query_finds_audio_memory():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    try:
+        async with make_client(media_root=media_root) as client:
+            create = await client.post(
+                "/api/memories/episodic/file",
+                data={"session_id": "session-audio", "content": "audio mpeg sprint recap"},
+                files={"file": ("recap.mp3", b"sprint recap", "audio/mpeg")},
+            )
+            query = await client.post("/api/retrieval/query", json={"query": "sprint recap", "top_k": 1})
+
+        assert create.status_code == 200
+        assert query.status_code == 200
+        assert query.json()["results"][0]["record"]["modality"] == "audio"
+        print("  PASS  text retrieval can return audio-backed memories")
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
 
 
 @pytest.mark.anyio
@@ -193,6 +245,56 @@ async def test_store_file_episode_infers_modality_from_extension_and_mime():
         assert pdf.json()["record"]["media_ref"].endswith(
             os.path.join("documents", f"{pdf.json()['record']['id']}.pdf")
         )
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+
+
+@pytest.mark.anyio
+async def test_query_by_image_endpoint_returns_vector_metadata_and_text_match():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    try:
+        async with make_client(media_root=media_root) as client:
+            await client.post(
+                "/api/memories/semantic",
+                json={"content": "image png architecture memory"},
+            )
+            response = await client.post(
+                "/api/retrieval/query-by-image",
+                data={"top_k": "1", "memory_types": "semantic"},
+                files={"file": ("diagram.png", b"architecture", "image/png")},
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["query_type"] == "vector"
+        assert payload["source_modality"] == "image"
+        assert payload["results"][0]["record"]["memory_type"] == "semantic"
+        print("  PASS  image query endpoint embeds uploads and returns vector query metadata")
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+
+
+@pytest.mark.anyio
+async def test_query_by_audio_endpoint_returns_vector_metadata_and_text_match():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    try:
+        async with make_client(media_root=media_root) as client:
+            await client.post(
+                "/api/memories/semantic",
+                json={"content": "audio mpeg sprint recap memory"},
+            )
+            response = await client.post(
+                "/api/retrieval/query-by-audio",
+                data={"top_k": "1", "memory_types": "semantic"},
+                files={"file": ("recap.mp3", b"sprint recap", "audio/mpeg")},
+            )
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["query_type"] == "vector"
+        assert payload["source_modality"] == "audio"
+        assert payload["results"][0]["record"]["memory_type"] == "semantic"
+        print("  PASS  audio query endpoint embeds uploads and returns vector query metadata")
     finally:
         shutil.rmtree(media_root, ignore_errors=True)
 
@@ -490,6 +592,25 @@ async def test_events_and_overview_reflect_activity():
     assert overview.json()["semantic_count"] == 1
     assert overview.json()["episodic_count"] == 1
     assert any(event["event_type"] == "memory.accessed" for event in events.json()["events"])
+
+
+@pytest.mark.anyio
+async def test_vector_query_events_include_source_modality():
+    async with make_client() as client:
+        await client.post("/api/memories/semantic", json={"content": "image png architecture memory"})
+        query = await client.post(
+            "/api/retrieval/query-by-image",
+            data={"top_k": "1"},
+            files={"file": ("diagram.png", b"architecture", "image/png")},
+        )
+        events = await client.get("/api/events", params={"limit": 10})
+
+    assert query.status_code == 200
+    ranked = next(event for event in events.json()["events"] if event["event_type"] == "memory.ranked")
+    retrieved = next(event for event in events.json()["events"] if event["event_type"] == "memory.retrieved")
+    assert ranked["data"]["query_type"] == "vector"
+    assert ranked["data"]["query_metadata"]["source_modality"] == "image"
+    assert retrieved["data"]["query_metadata"]["source_modality"] == "image"
 
 
 @pytest.mark.anyio
