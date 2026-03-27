@@ -31,6 +31,15 @@ class BaseStore(ABC):
         ...
 
     @abstractmethod
+    def retrieve_by_vector(
+        self,
+        vector: list[float],
+        top_k: int = 5,
+    ) -> list[tuple[MemoryRecord, float]]:
+        """Vector search. Returns (record, similarity_score) pairs, highest first."""
+        ...
+
+    @abstractmethod
     def update_access(self, record_id: str) -> None:
         """Bump access_count and last_accessed_at for a retrieved record."""
         ...

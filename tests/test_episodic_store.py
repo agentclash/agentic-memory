@@ -13,7 +13,7 @@ import config
 from events.bus import EventBus
 from models.episodic import EpisodicMemory
 from stores.episodic_store import EpisodicStore, EpisodicStoreError, MediaTooLargeError
-from tests.helpers import HashingEmbedder
+from tests.helpers import DeterministicMultimodalEmbedder, HashingEmbedder
 
 _TEMP_DIRS = []
 
@@ -574,8 +574,28 @@ def test_empty_store():
         datetime(2026, 1, 1, 0, 0),
         datetime(2026, 1, 1, 0, 1, tzinfo=timezone.utc),
     ) == []
+    assert store.retrieve_by_vector([1.0] + [0.0] * 63, top_k=3) == []
     store.update_access("missing")
     print("  PASS  empty store queries return clean empty results across direct query APIs")
+
+
+def test_retrieve_by_vector_supports_audio_embedding_against_text_memory():
+    embedder = DeterministicMultimodalEmbedder()
+    store, _ = fresh_setup(embedder=embedder)
+    audio_path = make_media_file(".mp3", b"standup")
+    record = EpisodicMemory(
+        content="audio mpeg standup project update",
+        session_id="session-audio",
+    )
+
+    store.store(record)
+    query_vector = embedder.embed_audio(audio_path, mime_type="audio/mpeg")
+    results = store.retrieve_by_vector(query_vector, top_k=1)
+
+    assert len(results) == 1
+    assert results[0][0].id == record.id
+    assert isinstance(results[0][1], float)
+    print("  PASS  episodic vector retrieval can match an audio embedding to a text memory")
 
 
 def test_oversized_media_fails_before_read_and_does_not_emit_event():
@@ -656,6 +676,7 @@ if __name__ == "__main__":
         test_retrieval_shape()
         test_access_tracking()
         test_empty_store()
+        test_retrieve_by_vector_supports_audio_embedding_against_text_memory()
         test_oversized_media_fails_before_read_and_does_not_emit_event()
         test_media_provider_errors_are_wrapped_and_do_not_emit_event()
         print("\nAll tests passed.")

@@ -13,7 +13,7 @@ import config
 from models.semantic import SemanticMemory
 from stores.media_store import MediaStore
 from stores.semantic_store import SemanticStore
-from tests.helpers import HashingEmbedder
+from tests.helpers import DeterministicMultimodalEmbedder, HashingEmbedder
 
 _TEMP_DIRS = []
 
@@ -221,10 +221,27 @@ def test_semantic_store_cleans_up_owned_media_on_failure():
     print("  PASS  failed semantic writes clean up owned media")
 
 
+def test_retrieve_by_vector_supports_image_embedding_against_text_memory():
+    embedder = DeterministicMultimodalEmbedder()
+    store, _ = fresh_setup(embedder=embedder)
+    image_path = make_media_file(".png", b"diagram")
+    record = SemanticMemory(content="image png diagram architecture memory")
+
+    store.store(record)
+    query_vector = embedder.embed_image(image_path, mime_type="image/png")
+    results = store.retrieve_by_vector(query_vector, top_k=1)
+
+    assert len(results) == 1
+    assert results[0][0].id == record.id
+    assert isinstance(results[0][1], float)
+    print("  PASS  semantic vector retrieval can match an image embedding to a text memory")
+
+
 if __name__ == "__main__":
     print("Semantic store tests:\n")
     test_text_semantic_round_trip_preserves_metadata()
     test_image_semantic_write_copies_media_and_uses_owned_path()
     test_multimodal_semantic_write_stores_one_vector_and_round_trips()
     test_semantic_store_cleans_up_owned_media_on_failure()
+    test_retrieve_by_vector_supports_image_embedding_against_text_memory()
     print("\nAll tests passed.")

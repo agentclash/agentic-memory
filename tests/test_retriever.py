@@ -14,7 +14,7 @@ from models.semantic import SemanticMemory
 from stores.episodic_store import EpisodicStore
 from stores.semantic_store import SemanticStore
 from retrieval.retriever import UnifiedRetriever
-from tests.helpers import HashingEmbedder
+from tests.helpers import DeterministicMultimodalEmbedder, HashingEmbedder
 
 _DB_PATHS = []
 
@@ -38,6 +38,27 @@ def fresh_mixed_setup():
     episodic_store = EpisodicStore(embedder=HashingEmbedder())
     retriever = UnifiedRetriever(stores={"semantic": semantic_store, "episodic": episodic_store})
     return semantic_store, episodic_store, retriever, db_path
+
+
+def fresh_vector_setup():
+    db_path = tempfile.mkdtemp(prefix="chroma_test_retriever_vector_")
+    _DB_PATHS.append(db_path)
+    shutil.rmtree(db_path, ignore_errors=True)
+    config.CHROMA_DB_PATH = db_path
+    embedder = DeterministicMultimodalEmbedder(dimensions=config.EMBEDDING_DIMENSIONS)
+    semantic_store = SemanticStore(embedder=embedder)
+    episodic_store = EpisodicStore(embedder=embedder)
+    retriever = UnifiedRetriever(stores={"semantic": semantic_store, "episodic": episodic_store})
+    return semantic_store, episodic_store, retriever, embedder, db_path
+
+
+def make_media_file(suffix: str, data: bytes) -> str:
+    fd, path = tempfile.mkstemp(suffix=suffix, prefix="retriever_vector_media_")
+    os.close(fd)
+    with open(path, "wb") as handle:
+        handle.write(data)
+    _DB_PATHS.append(path)
+    return path
 
 
 def test_ranked_retrieval():
@@ -204,6 +225,62 @@ def test_temporal_queries_update_episodic_access_counts():
     print("  PASS  temporal retriever queries update episodic access tracking")
 
 
+def test_query_by_vector_reuses_ranking_and_access_tracking():
+    semantic_store, episodic_store, retriever, embedder, _ = fresh_vector_setup()
+    now = datetime.now(timezone.utc)
+
+    semantic_store.store(
+        SemanticMemory(
+            content="image png architecture roadmap",
+            created_at=now - timedelta(minutes=5),
+            importance=0.8,
+        )
+    )
+    episodic_store.store(
+        EpisodicMemory(
+            content="image png architecture standup",
+            session_id="session-vector",
+            created_at=now,
+            importance=0.9,
+        )
+    )
+
+    image_path = make_media_file(".png", b"architecture")
+    vector = embedder.embed_image(image_path, mime_type="image/png")
+    results = retriever.query_by_vector(
+        vector,
+        top_k=2,
+        metadata={"source_modality": "image"},
+    )
+
+    assert len(results) == 2
+    assert {result.record.memory_type for result in results} == {"semantic", "episodic"}
+    for result in results:
+        assert result.record.access_count == 1
+
+    persisted_counts = []
+    for result in results:
+        if result.record.memory_type == "semantic":
+            persisted = semantic_store.get_by_id(result.record.id)
+        else:
+            persisted = episodic_store.get_by_id(result.record.id)
+        assert persisted is not None
+        persisted_counts.append(persisted.access_count)
+    assert sorted(persisted_counts) == [1, 1]
+    print("  PASS  query_by_vector reuses ranking and access tracking across stores")
+
+
+def test_query_by_vector_rejects_wrong_dimensions_before_store_lookup():
+    _, _, retriever, _, _ = fresh_vector_setup()
+
+    try:
+        retriever.query_by_vector([1.0], top_k=1)
+        raise AssertionError("Expected query_by_vector() to reject the wrong dimension")
+    except ValueError as exc:
+        assert str(config.EMBEDDING_DIMENSIONS) in str(exc)
+    print("  PASS  query_by_vector rejects vectors with the wrong dimension")
+
+
 def cleanup():
     for d in _DB_PATHS:
         shutil.rmtree(d, ignore_errors=True)
@@ -220,6 +297,8 @@ if __name__ == "__main__":
         test_mixed_store_retrieval()
         test_query_recent_and_time_range_return_episodic_only()
         test_temporal_queries_update_episodic_access_counts()
+        test_query_by_vector_reuses_ranking_and_access_tracking()
+        test_query_by_vector_rejects_wrong_dimensions_before_store_lookup()
         print("\nAll tests passed.")
     finally:
         cleanup()
