@@ -78,8 +78,15 @@ class SemanticStore(BaseStore):
 
     def retrieve(self, query: str, top_k: int = 5) -> list[tuple[SemanticMemory, float]]:
         query_embedding = self._embedder.embed_query(query)
+        return self.retrieve_by_vector(query_embedding, top_k=top_k)
+
+    def retrieve_by_vector(
+        self,
+        vector: list[float],
+        top_k: int = 5,
+    ) -> list[tuple[SemanticMemory, float]]:
         result = self._collection.query(
-            query_embeddings=[query_embedding],
+            query_embeddings=[vector],
             n_results=top_k,
             include=["embeddings", "documents", "metadatas", "distances"],
         )

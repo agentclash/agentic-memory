@@ -32,12 +32,14 @@ class FakeStore(BaseStore):
         memory_type: str,
         results: list[tuple[SemanticMemory, float]],
         *,
+        vector_results=None,
         recent_records=None,
         ranged_records=None,
     ):
         super().__init__()
         self._memory_type = memory_type
         self._results = results
+        self._vector_results = vector_results if vector_results is not None else results
         self._recent_records = recent_records or []
         self._ranged_records = ranged_records or []
         self.updated_ids = []
@@ -54,6 +56,9 @@ class FakeStore(BaseStore):
 
     def retrieve(self, query: str, top_k: int = 5):
         return self._results[:top_k]
+
+    def retrieve_by_vector(self, vector: list[float], top_k: int = 5):
+        return self._vector_results[:top_k]
 
     def update_access(self, record_id: str) -> None:
         self.updated_ids.append(record_id)
@@ -230,6 +235,72 @@ def test_retriever_emits_empty_summary_without_access_events():
     print("  PASS  empty retrieval emits summary events but no access events")
 
 
+def test_retriever_vector_queries_emit_retrieved_ranked_and_accessed():
+    now = datetime.now(timezone.utc)
+    best = SemanticMemory(
+        content="image png architecture memory",
+        created_at=now - timedelta(minutes=5),
+        importance=0.9,
+    )
+    other = SemanticMemory(
+        content="audio mpeg sprint recap",
+        created_at=now - timedelta(days=5),
+        importance=0.2,
+    )
+
+    semantic_store = FakeStore("semantic", [], vector_results=[(best, 0.92), (other, 0.35)])
+    bus = EventBus()
+    recorder = EventRecorder(bus, "memory.retrieved", "memory.ranked", "memory.accessed")
+    retriever = UnifiedRetriever(stores={"semantic": semantic_store}, event_bus=bus)
+
+    results = retriever.query_by_vector(
+        [1.0] * config.EMBEDDING_DIMENSIONS,
+        top_k=1,
+        metadata={"source_modality": "image"},
+    )
+
+    assert len(results) == 1
+    assert [event.event_type for event in recorder.events] == [
+        "memory.retrieved",
+        "memory.ranked",
+        "memory.accessed",
+    ]
+
+    retrieved_event, ranked_event, accessed_event = recorder.events
+    assert retrieved_event.data["query_type"] == "vector"
+    assert retrieved_event.data["vector_dimensions"] == config.EMBEDDING_DIMENSIONS
+    assert retrieved_event.data["query_metadata"]["source_modality"] == "image"
+    assert retrieved_event.data["memory_types"] == ("semantic",)
+    assert retrieved_event.data["candidate_count"] == 2
+    assert ranked_event.data["query_type"] == "vector"
+    assert ranked_event.data["vector_dimensions"] == config.EMBEDDING_DIMENSIONS
+    assert ranked_event.data["query_metadata"]["source_modality"] == "image"
+    assert ranked_event.data["results"][0]["record_id"] == best.id
+    assert accessed_event.data["record_id"] == best.id
+    assert semantic_store.updated_ids == [best.id]
+    print("  PASS  vector retrieval emits retrieved, ranked, and accessed events")
+
+
+def test_retriever_vector_queries_emit_empty_summary_without_access_events():
+    bus = EventBus()
+    recorder = EventRecorder(bus, "memory.retrieved", "memory.ranked", "memory.accessed")
+    retriever = UnifiedRetriever(stores={"semantic": FakeStore("semantic", [])}, event_bus=bus)
+
+    results = retriever.query_by_vector([1.0] * config.EMBEDDING_DIMENSIONS, top_k=3)
+
+    assert results == []
+    assert [event.event_type for event in recorder.events] == [
+        "memory.retrieved",
+        "memory.ranked",
+    ]
+    assert recorder.events[0].data["query_type"] == "vector"
+    assert recorder.events[0].data["candidate_count"] == 0
+    assert recorder.events[0].data["top_similarity"] is None
+    assert recorder.events[1].data["query_type"] == "vector"
+    assert recorder.events[1].data["results"] == ()
+    print("  PASS  empty vector retrieval emits summary events but no access events")
+
+
 def test_retriever_reports_filtered_memory_types():
     now = datetime.now(timezone.utc)
     semantic_record = SemanticMemory(content="Semantic fact", created_at=now, importance=0.5)
@@ -301,6 +372,8 @@ if __name__ == "__main__":
     test_episodic_store_emits_media_context_in_memory_stored()
     test_retriever_emits_retrieved_ranked_and_accessed()
     test_retriever_emits_empty_summary_without_access_events()
+    test_retriever_vector_queries_emit_retrieved_ranked_and_accessed()
+    test_retriever_vector_queries_emit_empty_summary_without_access_events()
     test_retriever_reports_filtered_memory_types()
     test_retriever_temporal_queries_emit_and_access_episodic_context()
     print("\nAll tests passed.")
