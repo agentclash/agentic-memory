@@ -12,4 +12,5 @@ class EpisodicMemory(MemoryRecord):
     participants: list[str] = field(default_factory=lambda: ["user", "agent"])
     summary: str | None = None
     emotional_valence: float | None = None
+    emotional_profile: dict[str, float] = field(default_factory=dict)
     source_mime_type: str | None = None

@@ -43,6 +43,7 @@ class SemanticStore(BaseStore):
                 "memory_type": record.memory_type,
                 "content": record.content,
                 "modality": record.modality,
+                "has_media": record.has_media,
                 "importance": record.importance,
                 **({"media_ref": record.media_ref} if record.media_ref else {}),
             },
@@ -105,6 +106,9 @@ class SemanticStore(BaseStore):
             "source": record.source or "",
             "category": record.category,
             "confidence": record.confidence,
+            "media_ref": record.media_ref or "",
+            "media_type": record.media_type or "",
+            "text_description": record.text_description or "",
         }
 
     def _build_record(self, doc: str, id: str, embedding, meta: dict) -> SemanticMemory:
@@ -121,6 +125,9 @@ class SemanticStore(BaseStore):
             category=meta["category"],
             confidence=float(meta["confidence"]),
             modality=meta["modality"],
+            media_ref=meta.get("media_ref") or None,
+            media_type=meta.get("media_type") or None,
+            text_description=meta.get("text_description") or None,
         )
 
     def _from_result(self, result: dict, index: int) -> SemanticMemory:
