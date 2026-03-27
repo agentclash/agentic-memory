@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import logging
 import math
 import mimetypes
@@ -141,19 +140,6 @@ class GeminiEmbedder:
 
         if chunked:
             modality, source, explicit_mime = chunked[0]
-            self._log_multimodal_request(
-                text=text,
-                image=image,
-                audio=audio,
-                video=video,
-                pdf=pdf,
-                image_mime_type=image_mime_type,
-                audio_mime_type=audio_mime_type,
-                video_mime_type=video_mime_type,
-                pdf_mime_type=pdf_mime_type,
-                chunked_modality=modality,
-                chunked_source=source,
-            )
             return self._embed_media(
                 source,
                 modality=modality,
@@ -163,63 +149,7 @@ class GeminiEmbedder:
 
         if not base_parts:
             raise ValueError("embed_multimodal requires at least one text or media input")
-        self._log_multimodal_request(
-            text=text,
-            image=image,
-            audio=audio,
-            video=video,
-            pdf=pdf,
-            image_mime_type=image_mime_type,
-            audio_mime_type=audio_mime_type,
-            video_mime_type=video_mime_type,
-            pdf_mime_type=pdf_mime_type,
-        )
         return self._embed_parts(base_parts, self._document_config())
-
-    def _log_multimodal_request(
-        self,
-        *,
-        text: str | None,
-        image: str | Path | bytes | None,
-        audio: str | Path | bytes | None,
-        video: str | Path | bytes | None,
-        pdf: str | Path | bytes | None,
-        image_mime_type: str | None,
-        audio_mime_type: str | None,
-        video_mime_type: str | None,
-        pdf_mime_type: str | None,
-        chunked_modality: str | None = None,
-        chunked_source: str | Path | bytes | None = None,
-    ) -> None:
-        def _describe_source(source: str | Path | bytes | None) -> dict | None:
-            if source is None:
-                return None
-            if isinstance(source, bytes):
-                return {"kind": "bytes", "size": len(source)}
-            path = Path(source)
-            return {
-                "kind": "path",
-                "path": str(path),
-                "exists": path.exists(),
-                "suffix": path.suffix.lower(),
-            }
-
-        _logger.debug(
-            "embed_multimodal request: text_len=%s image=%s image_mime=%s "
-            "audio=%s audio_mime=%s video=%s video_mime=%s pdf=%s pdf_mime=%s "
-            "chunked_modality=%s chunked_source=%s",
-            len(text) if text is not None else 0,
-            _describe_source(image),
-            image_mime_type,
-            _describe_source(audio),
-            audio_mime_type,
-            _describe_source(video),
-            video_mime_type,
-            _describe_source(pdf),
-            pdf_mime_type,
-            chunked_modality,
-            _describe_source(chunked_source),
-        )
 
     def _embed_media(
         self,
@@ -297,7 +227,6 @@ class GeminiEmbedder:
         return self._make_bytes_part(self._read_media_bytes(path), resolved_mime)
 
     def _embed_parts(self, parts: list[Any], config: Any) -> list[float]:
-        self._log_parts_summary(parts)
         content = self._make_content(parts)
         return self._embed([content], config)[0]
 
@@ -337,37 +266,6 @@ class GeminiEmbedder:
             if self._is_provider_server_error(exc):
                 raise EmbeddingProviderError("Gemini embedding provider failed after retries") from exc
             raise
-
-    def _log_parts_summary(self, parts: list[Any]) -> None:
-        summary = []
-        for part in parts:
-            text = getattr(part, "text", None)
-            if isinstance(text, str):
-                summary.append(
-                    {
-                        "type": "text",
-                        "len": len(text),
-                        "sha16": hashlib.sha256(text.encode("utf-8")).hexdigest()[:16],
-                        "preview": text[:80],
-                    }
-                )
-                continue
-
-            inline = getattr(part, "inline_data", None)
-            if inline is not None:
-                data = getattr(inline, "data", b"")
-                summary.append(
-                    {
-                        "type": "inline_data",
-                        "mime_type": getattr(inline, "mime_type", None),
-                        "size": len(data),
-                    }
-                )
-                continue
-
-            summary.append({"type": type(part).__name__})
-
-        _logger.debug("embed parts summary: %s", summary)
 
     def _normalize_vector(self, vector: list[float]) -> list[float]:
         if len(vector) != EMBEDDING_DIMENSIONS:
