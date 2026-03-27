@@ -215,6 +215,25 @@ async def test_store_file_episode_allows_non_pdf_multimodal_upload():
 
 
 @pytest.mark.anyio
+async def test_multimodal_file_upload_rejects_unsupported_file_type():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    try:
+        async with make_client(media_root=media_root) as client:
+            response = await client.post(
+                "/api/memories/episodic/file",
+                data={"session_id": "session-multimodal", "modality": "multimodal"},
+                files={"file": ("archive.tar.gz", b"bad-archive", "application/gzip")},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "multimodal file uploads require a supported image, audio, video, or PDF file"
+        )
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+
+
+@pytest.mark.anyio
 async def test_semantic_memory_requires_media_ref_for_non_text_modalities():
     async with make_client() as client:
         response = await client.post(
@@ -227,6 +246,21 @@ async def test_semantic_memory_requires_media_ref_for_non_text_modalities():
 
     assert response.status_code == 400
     assert response.json()["detail"] == "media_ref is required when modality is not text"
+
+
+@pytest.mark.anyio
+async def test_semantic_memory_rejects_invalid_related_ids():
+    async with make_client() as client:
+        response = await client.post(
+            "/api/memories/semantic",
+            json={
+                "content": "Bad semantic relation payload",
+                "related_ids": ["ok", 123],
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "related_ids must contain only strings"
 
 
 @pytest.mark.anyio
@@ -336,6 +370,44 @@ async def test_failed_semantic_write_cleans_up_owned_media():
             )
 
         assert response.status_code == 500
+        assert not any(path.is_file() for path in Path(media_root).rglob("*"))
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+        try:
+            os.remove(source_path)
+        except FileNotFoundError:
+            pass
+
+
+@pytest.mark.anyio
+async def test_bad_request_semantic_write_cleans_up_owned_media():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    fd, source_path = tempfile.mkstemp(suffix=".png", prefix="semantic_api_source_")
+    os.close(fd)
+    Path(source_path).write_bytes(b"semantic-image")
+    try:
+        async with make_client(media_root=media_root) as client:
+            await client.get("/api/overview")
+            service = client.app.state.service
+
+            def fail_store(record):
+                owned_ref = service.media_store.store(record.media_ref, record.id)
+                record.media_ref = owned_ref
+                raise ValueError("synthetic validation failure")
+
+            service.semantic_store.store = fail_store
+            response = await client.post(
+                "/api/memories/semantic",
+                json={
+                    "content": "This semantic write should fail with a 400",
+                    "modality": "image",
+                    "media_ref": source_path,
+                    "media_type": "image",
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "synthetic validation failure"
         assert not any(path.is_file() for path in Path(media_root).rglob("*"))
     finally:
         shutil.rmtree(media_root, ignore_errors=True)

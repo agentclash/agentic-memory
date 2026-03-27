@@ -106,6 +106,25 @@ def _validate_emotional_profile(raw_profile: Any) -> dict[str, float]:
     return profile
 
 
+def _validate_related_ids(raw_related_ids: Any) -> list[str]:
+    if raw_related_ids is None:
+        return []
+    if not isinstance(raw_related_ids, list):
+        raise ValueError("related_ids must be an array of strings")
+
+    related_ids: list[str] = []
+    for value in raw_related_ids:
+        if not isinstance(value, str):
+            raise ValueError("related_ids must contain only strings")
+        related_ids.append(value)
+    return related_ids
+
+
+def _cleanup_owned_media(service: MemoryAPIService, media_ref: str | None) -> None:
+    if media_ref and service.media_store.owns(media_ref):
+        service.media_store.delete(media_ref)
+
+
 def _serialise_record(record: MemoryRecord) -> dict[str, Any]:
     payload = {
         "id": record.id,
@@ -281,6 +300,7 @@ def create_app(
                 raise ValueError("media_ref is required when modality is not text")
             if resolved_modality == "multimodal" and media_type is None:
                 raise ValueError("multimodal semantic memory requires a supported media_type")
+            related_ids = _validate_related_ids(payload.get("related_ids"))
             record = SemanticMemory(
                 content=payload["content"],
                 importance=float(payload.get("importance", 0.5)),
@@ -288,7 +308,7 @@ def create_app(
                 domain=payload.get("domain"),
                 confidence=float(payload.get("confidence", 1.0)),
                 supersedes=payload.get("supersedes"),
-                related_ids=payload.get("related_ids", []),
+                related_ids=related_ids,
                 has_visual=bool(payload.get("has_visual", False)),
                 modality=resolved_modality,
                 media_ref=media_ref,
@@ -300,13 +320,11 @@ def create_app(
         active_service = service()
         try:
             active_service.semantic_store.store(record)
-        except FileNotFoundError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        except ValueError as exc:
+        except (FileNotFoundError, ValueError) as exc:
+            _cleanup_owned_media(active_service, record.media_ref)
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception:
-            if record.media_ref and active_service.media_store.owns(record.media_ref):
-                active_service.media_store.delete(record.media_ref)
+            _cleanup_owned_media(active_service, record.media_ref)
             raise
         return {"record": _serialise_record(record)}
 
@@ -350,6 +368,11 @@ def create_app(
             resolved_modality = requested_modality or normalize_modality(inferred_modality)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if requested_modality == "multimodal" and inferred_media_type is None:
+            raise HTTPException(
+                status_code=400,
+                detail="multimodal file uploads require a supported image, audio, video, or PDF file",
+            )
         if (
             requested_modality is not None
             and inferred_modality is not None

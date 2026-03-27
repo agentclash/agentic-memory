@@ -220,7 +220,23 @@ class EpisodicStore(BaseStore):
         kwargs = {"text": self._fallback_text(record)}
         kwargs[media_type] = str(media_path)
         kwargs[f"{media_type}_mime_type"] = record.source_mime_type or None
-        return self._embedder.embed_multimodal(**kwargs)
+        try:
+            return self._embedder.embed_multimodal(**kwargs)
+        except Exception as exc:
+            try:
+                fallback = self._embedder.embed_text(self._fallback_text(record))
+            except Exception as fallback_exc:
+                raise EpisodicStoreError(
+                    "Failed to embed episodic multimodal record: "
+                    f"media_type={media_type} path={record.media_ref}"
+                ) from fallback_exc
+
+            record.metadata = {
+                **record.metadata,
+                "embedding_strategy": "text_fallback",
+                "media_embed_error": str(exc),
+            }
+            return fallback
 
     def _fallback_text(self, record: EpisodicMemory) -> str:
         parts = [record.content]
@@ -243,31 +259,18 @@ class EpisodicStore(BaseStore):
         return embed_method_name, mime_type
 
     def _resolve_multimodal_media_type(self, record: EpisodicMemory, media_path: Path) -> str:
-        if record.media_type in {"image", "audio", "video", "pdf"}:
-            return record.media_type
-
-        suffix = media_path.suffix.lower()
-        if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
-            return "image"
-        if suffix in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}:
-            return "audio"
-        if suffix in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
-            return "video"
-        if suffix == ".pdf":
-            return "pdf"
-        raise EpisodicStoreError(
-            f"Cannot store multimodal episodic record: unsupported media_type for {media_path.name}"
-        )
+        try:
+            return MediaStore.resolve_media_type(media_path, record.media_type)
+        except ValueError as exc:
+            raise EpisodicStoreError(
+                f"Cannot store multimodal episodic record: unsupported media_type for {media_path.name}"
+            ) from exc
 
     def _ensure_owned_media(self, record: EpisodicMemory) -> str | None:
         if not record.media_ref or self._media_store is None:
             return None
-        if self._media_store.owns(record.media_ref):
-            return None
-
-        owned_media_ref = self._media_store.store(record.media_ref, record.id)
-        record.media_ref = owned_media_ref
-        return owned_media_ref
+        record.media_ref, copied = self._media_store.ensure_owned(record.media_ref, record.id)
+        return record.media_ref if copied else None
 
     def _to_metadata(self, record: EpisodicMemory) -> dict:
         emotional_profile = (

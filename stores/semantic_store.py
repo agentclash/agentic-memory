@@ -183,12 +183,8 @@ class SemanticStore(BaseStore):
     def _ensure_owned_media(self, record: SemanticMemory) -> str | None:
         if not record.media_ref or self._media_store is None:
             return None
-        if self._media_store.owns(record.media_ref):
-            return None
-
-        owned_media_ref = self._media_store.store(record.media_ref, record.id)
-        record.media_ref = owned_media_ref
-        return owned_media_ref
+        record.media_ref, copied = self._media_store.ensure_owned(record.media_ref, record.id)
+        return record.media_ref if copied else None
 
     def _require_media_path(self, record: SemanticMemory) -> Path:
         if not record.media_ref:
@@ -199,19 +195,7 @@ class SemanticStore(BaseStore):
         return media_path
 
     def _resolve_multimodal_media_type(self, record: SemanticMemory, media_path: Path) -> str:
-        if record.media_type in {"image", "audio", "video", "pdf"}:
-            return record.media_type
-
-        suffix = media_path.suffix.lower()
-        if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
-            return "image"
-        if suffix in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}:
-            return "audio"
-        if suffix in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
-            return "video"
-        if suffix == ".pdf":
-            return "pdf"
-        raise ValueError("Multimodal semantic memory requires a supported media_type or file extension")
+        return MediaStore.resolve_media_type(media_path, record.media_type)
 
     def _text_context(self, record: SemanticMemory) -> str:
         parts = [record.content]
