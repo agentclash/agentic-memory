@@ -22,7 +22,7 @@ from retrieval.retriever import UnifiedRetriever
 from stores.episodic_store import EpisodicStore, EpisodicStoreError, MediaTooLargeError
 from stores.media_store import MediaStore
 from stores.semantic_store import SemanticStore
-from utils.embeddings import TextEmbedder
+from utils.embeddings import EmbeddingProviderError, TextEmbedder
 
 DEFAULT_ALLOWED_ORIGINS = [
     "http://localhost:3000",
@@ -56,21 +56,41 @@ def _jsonable(value: Any) -> Any:
 def _infer_media_contract(*, mime_type: str | None, filename: str | None) -> tuple[str, str] | None:
     guessed_mime = mime_type or mimetypes.guess_type(filename or "")[0]
     if guessed_mime:
-        if guessed_mime.startswith("image/"):
+        if guessed_mime in {"image/png", "image/jpeg", "image/webp", "image/heic", "image/heif"}:
             return "image", "image"
-        if guessed_mime.startswith("audio/"):
+        if guessed_mime in {
+            "audio/mpeg",
+            "audio/mp3",
+            "audio/wav",
+            "audio/x-wav",
+            "audio/wave",
+            "audio/aiff",
+            "audio/x-aiff",
+            "audio/aac",
+            "audio/flac",
+            "audio/ogg",
+        }:
             return "audio", "audio"
-        if guessed_mime.startswith("video/"):
+        if guessed_mime in {
+            "video/mp4",
+            "video/mpeg",
+            "video/quicktime",
+            "video/x-msvideo",
+            "video/x-flv",
+            "video/webm",
+            "video/x-ms-wmv",
+            "video/3gpp",
+        }:
             return "video", "video"
         if guessed_mime == "application/pdf":
             return "multimodal", "pdf"
 
     suffix = Path(filename or "").suffix.lower()
-    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp"}:
+    if suffix in {".png", ".jpg", ".jpeg", ".webp", ".heic", ".heif"}:
         return "image", "image"
-    if suffix in {".mp3", ".wav", ".m4a", ".aac", ".flac", ".ogg"}:
+    if suffix in {".mp3", ".wav", ".aif", ".aiff", ".aac", ".flac", ".ogg"}:
         return "audio", "audio"
-    if suffix in {".mp4", ".mov", ".mkv", ".webm", ".avi"}:
+    if suffix in {".mp4", ".mpeg", ".mpg", ".mov", ".avi", ".flv", ".webm", ".wmv", ".3gp"}:
         return "video", "video"
     if suffix == ".pdf":
         return "multimodal", "pdf"
@@ -106,6 +126,25 @@ def _validate_emotional_profile(raw_profile: Any) -> dict[str, float]:
     return profile
 
 
+def _validate_related_ids(raw_related_ids: Any) -> list[str]:
+    if raw_related_ids is None:
+        return []
+    if not isinstance(raw_related_ids, list):
+        raise ValueError("related_ids must be an array of strings")
+
+    related_ids: list[str] = []
+    for value in raw_related_ids:
+        if not isinstance(value, str):
+            raise ValueError("related_ids must contain only strings")
+        related_ids.append(value)
+    return related_ids
+
+
+def _cleanup_owned_media(service: MemoryAPIService, media_ref: str | None) -> None:
+    if media_ref and service.media_store.owns(media_ref):
+        service.media_store.delete(media_ref)
+
+
 def _serialise_record(record: MemoryRecord) -> dict[str, Any]:
     payload = {
         "id": record.id,
@@ -125,7 +164,11 @@ def _serialise_record(record: MemoryRecord) -> dict[str, Any]:
         payload.update(
             {
                 "category": record.category,
+                "domain": record.domain,
                 "confidence": record.confidence,
+                "supersedes": record.supersedes,
+                "related_ids": record.related_ids,
+                "has_visual": record.has_visual,
             }
         )
     if isinstance(record, EpisodicMemory):
@@ -186,8 +229,16 @@ class MemoryAPIService:
         try:
             if chroma_path is not None:
                 config.CHROMA_DB_PATH = chroma_path
-            self.semantic_store = SemanticStore(event_bus=self.bus, embedder=embedder)
-            self.episodic_store = EpisodicStore(event_bus=self.bus, embedder=embedder)
+            self.semantic_store = SemanticStore(
+                event_bus=self.bus,
+                embedder=embedder,
+                media_store=self.media_store,
+            )
+            self.episodic_store = EpisodicStore(
+                event_bus=self.bus,
+                embedder=embedder,
+                media_store=self.media_store,
+            )
         finally:
             config.CHROMA_DB_PATH = original_chroma_path
         self.retriever = UnifiedRetriever(
@@ -259,20 +310,56 @@ def create_app(
         if not payload.get("content"):
             raise HTTPException(status_code=400, detail="content is required")
         try:
-            media_type = _validate_media_type(payload.get("media_type"))
+            modality = payload.get("modality", "text")
+            resolved_modality = normalize_modality(modality)
+            media_ref = payload.get("media_ref")
+            inferred_contract = _infer_media_contract(mime_type=None, filename=media_ref)
+            inferred_media_type = inferred_contract[1] if inferred_contract else None
+            media_type = _validate_media_type(payload.get("media_type")) or inferred_media_type
+            if resolved_modality != "text" and not media_ref:
+                raise ValueError("media_ref is required when modality is not text")
+            if resolved_modality == "multimodal" and media_type is None:
+                raise ValueError("multimodal semantic memory requires a supported media_type")
+            if (
+                resolved_modality in {"image", "audio", "video"}
+                and media_type is not None
+                and media_type != resolved_modality
+            ):
+                raise ValueError(
+                    f"media_type '{media_type}' does not match modality '{resolved_modality}'"
+                )
+            related_ids = _validate_related_ids(payload.get("related_ids"))
             record = SemanticMemory(
                 content=payload["content"],
                 importance=float(payload.get("importance", 0.5)),
                 category=payload.get("category", "general"),
+                domain=payload.get("domain"),
                 confidence=float(payload.get("confidence", 1.0)),
-                modality=payload.get("modality", "text"),
-                media_ref=payload.get("media_ref"),
+                supersedes=payload.get("supersedes"),
+                related_ids=related_ids,
+                has_visual=bool(payload.get("has_visual", False)),
+                modality=resolved_modality,
+                media_ref=media_ref,
                 media_type=media_type,
                 text_description=payload.get("text_description"),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        service().semantic_store.store(record)
+        active_service = service()
+        try:
+            active_service.semantic_store.store(record)
+        except (FileNotFoundError, ValueError) as exc:
+            _cleanup_owned_media(active_service, record.media_ref)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except EmbeddingProviderError as exc:
+            _cleanup_owned_media(active_service, record.media_ref)
+            raise HTTPException(
+                status_code=502,
+                detail="Gemini embedding provider failed after retries",
+            ) from exc
+        except Exception:
+            _cleanup_owned_media(active_service, record.media_ref)
+            raise
         return {"record": _serialise_record(record)}
 
     @app.post("/api/memories/episodic/text")
@@ -315,20 +402,20 @@ def create_app(
             resolved_modality = requested_modality or normalize_modality(inferred_modality)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
-        if requested_modality == "multimodal" and inferred_media_type != "pdf":
+        if requested_modality == "multimodal" and inferred_media_type is None:
             raise HTTPException(
                 status_code=400,
-                detail="multimodal file uploads currently require a PDF file",
+                detail="multimodal file uploads require a supported image, audio, video, or PDF file",
             )
-        if requested_modality is not None and inferred_modality is not None and requested_modality != inferred_modality:
+        if (
+            requested_modality is not None
+            and inferred_modality is not None
+            and requested_modality != inferred_modality
+            and requested_modality != "multimodal"
+        ):
             raise HTTPException(
                 status_code=400,
                 detail="uploaded file does not match the requested modality",
-            )
-        if resolved_modality == "multimodal" and inferred_media_type != "pdf":
-            raise HTTPException(
-                status_code=400,
-                detail="multimodal file uploads currently require a PDF file",
             )
         if resolved_modality not in _SUPPORTED_FILE_MODALITIES:
             raise HTTPException(

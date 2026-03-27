@@ -194,6 +194,17 @@ def test_probe_duration_requires_ffprobe():
             assert "ffprobe" in str(exc)
 
 
+def test_embed_image_accepts_provider_supported_webp_mime():
+    embedder = RecordingGeminiEmbedder()
+    with tempfile.NamedTemporaryFile(suffix=".webp") as handle:
+        handle.write(b"webp")
+        handle.flush()
+
+        vector = embedder.embed_image(handle.name, mime_type="image/webp")
+
+    assert len(vector) == EMBEDDING_DIMENSIONS
+
+
 def test_embed_image_rejects_unsupported_mime():
     embedder = RecordingGeminiEmbedder()
     with tempfile.NamedTemporaryFile(suffix=".gif") as handle:
@@ -243,6 +254,7 @@ if __name__ == "__main__":
     test_embed_multimodal_audio_chunks_with_text_and_image_context()
     test_embed_audio_requires_ffmpeg_when_chunking()
     test_probe_duration_requires_ffprobe()
+    test_embed_image_accepts_provider_supported_webp_mime()
     test_embed_image_rejects_unsupported_mime()
     test_embed_bytes_rejects_unsupported_mime()
     test_chunking_rejects_runaway_chunk_counts()

@@ -9,6 +9,7 @@ import config
 from events.bus import EventBus
 from models.episodic import EpisodicMemory
 from stores.base import BaseStore
+from stores.media_store import MediaStore
 from utils.embeddings import GeminiEmbedder, TextEmbedder
 
 _MEDIA_EMBED_METHODS = {
@@ -39,6 +40,7 @@ class EpisodicStore(BaseStore):
         self,
         event_bus: EventBus | None = None,
         embedder: TextEmbedder | None = None,
+        media_store: MediaStore | None = None,
         max_media_bytes: int | None = None,
     ):
         super().__init__(event_bus=event_bus)
@@ -48,34 +50,44 @@ class EpisodicStore(BaseStore):
             metadata={"hnsw:space": "cosine"},
         )
         self._embedder = embedder or GeminiEmbedder()
+        self._media_store = media_store
         self._max_media_bytes = (
             config.MEDIA_EMBED_MAX_BYTES if max_media_bytes is None else max_media_bytes
         )
 
     def store(self, record: EpisodicMemory) -> str:
-        embedding = self._embed_record(record)
-        record.embedding = embedding
+        owned_media_ref = None
+        try:
+            owned_media_ref = self._ensure_owned_media(record)
+            embedding = self._embed_record(record)
+            record.embedding = embedding
 
-        self._collection.add(
-            ids=[record.id],
-            embeddings=[embedding],
-            documents=[record.content],
-            metadatas=[self._to_metadata(record)],
-        )
-        self._emit_event(
-            "memory.stored",
-            {
-                "record_id": record.id,
-                "memory_type": record.memory_type,
-                "content": record.content,
-                "modality": record.modality,
-                "has_media": record.has_media,
-                "importance": record.importance,
-                "session_id": record.session_id,
-                **({"media_ref": record.media_ref} if record.media_ref else {}),
-            },
-        )
-        return record.id
+            self._collection.add(
+                ids=[record.id],
+                embeddings=[embedding],
+                documents=[record.content],
+                metadatas=[self._to_metadata(record)],
+            )
+            self._emit_event(
+                "memory.stored",
+                {
+                    "record_id": record.id,
+                    "memory_type": record.memory_type,
+                    "content": record.content,
+                    "modality": record.modality,
+                    "has_media": record.has_media,
+                    "importance": record.importance,
+                    "session_id": record.session_id,
+                    **({"media_ref": record.media_ref} if record.media_ref else {}),
+                },
+            )
+            return record.id
+        except Exception:
+            if owned_media_ref and self._media_store is not None:
+                self._media_store.delete(owned_media_ref)
+                if record.media_ref == owned_media_ref:
+                    record.media_ref = None
+            raise
 
     def get_by_id(self, record_id: str) -> EpisodicMemory | None:
         result = self._collection.get(
@@ -157,11 +169,6 @@ class EpisodicStore(BaseStore):
         if record.modality == "text" or not record.media_ref:
             return self._embedder.embed_text(self._fallback_text(record))
 
-        embed_method_name, mime_type = self._resolve_media_embedding(record)
-        embed_method = getattr(self._embedder, embed_method_name, None) if embed_method_name else None
-        if embed_method is None or mime_type is None:
-            return self._embedder.embed_text(self._fallback_text(record))
-
         media_path = Path(record.media_ref)
         if not media_path.exists():
             raise EpisodicStoreError(
@@ -176,10 +183,18 @@ class EpisodicStore(BaseStore):
                 f"limit_bytes={self._max_media_bytes} path={record.media_ref}"
             )
 
+        if record.modality == "multimodal":
+            return self._embed_multimodal_record(record, media_path)
+
+        embed_method_name, mime_type = self._resolve_media_embedding(record)
+        embed_method = getattr(self._embedder, embed_method_name, None) if embed_method_name else None
+        if embed_method is None or mime_type is None:
+            return self._embedder.embed_text(self._fallback_text(record))
+
         try:
             return embed_method(
                 str(media_path),
-                description=record.text_description,
+                description=self._fallback_text(record),
                 mime_type=mime_type,
             )
         except Exception as exc:
@@ -200,6 +215,29 @@ class EpisodicStore(BaseStore):
             }
             return fallback
 
+    def _embed_multimodal_record(self, record: EpisodicMemory, media_path: Path) -> list[float]:
+        media_type = self._resolve_multimodal_media_type(record, media_path)
+        kwargs = {"text": self._fallback_text(record)}
+        kwargs[media_type] = str(media_path)
+        kwargs[f"{media_type}_mime_type"] = record.source_mime_type or None
+        try:
+            return self._embedder.embed_multimodal(**kwargs)
+        except Exception as exc:
+            try:
+                fallback = self._embedder.embed_text(self._fallback_text(record))
+            except Exception as fallback_exc:
+                raise EpisodicStoreError(
+                    "Failed to embed episodic multimodal record: "
+                    f"media_type={media_type} path={record.media_ref}"
+                ) from fallback_exc
+
+            record.metadata = {
+                **record.metadata,
+                "embedding_strategy": "text_fallback",
+                "media_embed_error": str(exc),
+            }
+            return fallback
+
     def _fallback_text(self, record: EpisodicMemory) -> str:
         parts = [record.content]
         if record.summary:
@@ -211,12 +249,6 @@ class EpisodicStore(BaseStore):
         return "\n".join(part for part in parts if part)
 
     def _resolve_media_embedding(self, record: EpisodicMemory) -> tuple[str | None, str | None]:
-        if record.modality == "multimodal":
-            if record.media_type == "pdf" or record.source_mime_type == "application/pdf":
-                return "embed_pdf", record.source_mime_type or "application/pdf"
-            # TODO: Route non-PDF multimodal records through embed_multimodal once MM-5D lands.
-            return None, None
-
         embed_method_name = _MEDIA_EMBED_METHODS.get(record.modality)
         if embed_method_name is None:
             return None, None
@@ -225,6 +257,20 @@ class EpisodicStore(BaseStore):
             "application/octet-stream",
         )
         return embed_method_name, mime_type
+
+    def _resolve_multimodal_media_type(self, record: EpisodicMemory, media_path: Path) -> str:
+        try:
+            return MediaStore.resolve_media_type(media_path, record.media_type)
+        except ValueError as exc:
+            raise EpisodicStoreError(
+                f"Cannot store multimodal episodic record: unsupported media_type for {media_path.name}"
+            ) from exc
+
+    def _ensure_owned_media(self, record: EpisodicMemory) -> str | None:
+        if not record.media_ref or self._media_store is None:
+            return None
+        record.media_ref, copied = self._media_store.ensure_owned(record.media_ref, record.id)
+        return record.media_ref if copied else None
 
     def _to_metadata(self, record: EpisodicMemory) -> dict:
         emotional_profile = (

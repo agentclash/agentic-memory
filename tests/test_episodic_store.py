@@ -34,6 +34,21 @@ class FailingMediaEmbedder(HashingEmbedder):
     ) -> list[float]:
         raise RuntimeError("provider rejected media payload")
 
+    def embed_multimodal(
+        self,
+        *,
+        text: str | None = None,
+        image: str | None = None,
+        audio: str | None = None,
+        video: str | None = None,
+        pdf: str | None = None,
+        image_mime_type: str | None = "image/png",
+        audio_mime_type: str | None = "audio/mpeg",
+        video_mime_type: str | None = "video/mp4",
+        pdf_mime_type: str | None = "application/pdf",
+    ) -> list[float]:
+        raise RuntimeError("provider rejected multimodal payload")
+
 
 class RecordingMediaEmbedder(HashingEmbedder):
     def __init__(self):
@@ -57,6 +72,44 @@ class RecordingMediaEmbedder(HashingEmbedder):
     ) -> list[float]:
         self.calls.append((source, description, mime_type))
         return super().embed_pdf(source, description=description, mime_type=mime_type)
+
+    def embed_multimodal(
+        self,
+        *,
+        text: str | None = None,
+        image: str | None = None,
+        audio: str | None = None,
+        video: str | None = None,
+        pdf: str | None = None,
+        image_mime_type: str | None = "image/png",
+        audio_mime_type: str | None = "audio/mpeg",
+        video_mime_type: str | None = "video/mp4",
+        pdf_mime_type: str | None = "application/pdf",
+    ) -> list[float]:
+        self.calls.append(
+            {
+                "text": text,
+                "image": image,
+                "audio": audio,
+                "video": video,
+                "pdf": pdf,
+                "image_mime_type": image_mime_type,
+                "audio_mime_type": audio_mime_type,
+                "video_mime_type": video_mime_type,
+                "pdf_mime_type": pdf_mime_type,
+            }
+        )
+        return super().embed_multimodal(
+            text=text,
+            image=image,
+            audio=audio,
+            video=video,
+            pdf=pdf,
+            image_mime_type=image_mime_type,
+            audio_mime_type=audio_mime_type,
+            video_mime_type=video_mime_type,
+            pdf_mime_type=pdf_mime_type,
+        )
 
 
 def fresh_setup(*, event_bus: EventBus | None = None, embedder=None, max_media_bytes: int | None = None):
@@ -192,11 +245,17 @@ def test_media_backed_episode_uses_path_based_embedder_interface():
 
     store.store(record)
 
-    assert embedder.calls == [(media_path, "Stack trace in the CI log", "image/png")]
+    assert embedder.calls == [
+        (
+            media_path,
+            "Screenshot of a failing run\nStack trace in the CI log\nuser agent",
+            "image/png",
+        )
+    ]
     print("  PASS  episodic media writes call the path-based embedder interface")
 
 
-def test_pdf_backed_multimodal_episode_uses_pdf_embedder():
+def test_pdf_backed_multimodal_episode_uses_multimodal_embedder():
     embedder = RecordingMediaEmbedder()
     store, _ = fresh_setup(embedder=embedder)
     media_path = make_media_file(".pdf", b"%PDF-1.4\nmultimodal")
@@ -212,8 +271,73 @@ def test_pdf_backed_multimodal_episode_uses_pdf_embedder():
 
     store.store(record)
 
-    assert embedder.calls == [(media_path, "PDF handoff from the design review", "application/pdf")]
-    print("  PASS  multimodal PDF writes route through the PDF embedder")
+    assert embedder.calls == [
+        {
+            "text": "Design notes from the review\nPDF handoff from the design review\nuser agent",
+            "image": None,
+            "audio": None,
+            "video": None,
+            "pdf": media_path,
+            "image_mime_type": "image/png",
+            "audio_mime_type": "audio/mpeg",
+            "video_mime_type": "video/mp4",
+            "pdf_mime_type": "application/pdf",
+        }
+    ]
+    print("  PASS  multimodal PDF writes route through the multimodal embedder")
+
+
+def test_audio_backed_multimodal_episode_uses_multimodal_embedder():
+    embedder = RecordingMediaEmbedder()
+    store, _ = fresh_setup(embedder=embedder)
+    media_path = make_media_file(".mp3", b"multimodal-audio")
+    record = EpisodicMemory(
+        content="Audio handoff from the incident review",
+        session_id="session-audio-multimodal",
+        modality="multimodal",
+        media_ref=media_path,
+        media_type="audio",
+        source_mime_type="audio/mpeg",
+        text_description="Narrated incident summary",
+    )
+
+    store.store(record)
+
+    assert embedder.calls == [
+        {
+            "text": "Audio handoff from the incident review\nNarrated incident summary\nuser agent",
+            "image": None,
+            "audio": media_path,
+            "video": None,
+            "pdf": None,
+            "image_mime_type": "image/png",
+            "audio_mime_type": "audio/mpeg",
+            "video_mime_type": "video/mp4",
+            "pdf_mime_type": "application/pdf",
+        }
+    ]
+    print("  PASS  multimodal audio writes route through the multimodal embedder")
+
+
+def test_multimodal_embedder_failure_falls_back_to_text_embedding():
+    embedder = FailingMediaEmbedder()
+    store, _ = fresh_setup(embedder=embedder)
+    media_path = make_media_file(".pdf", b"%PDF-1.4\nmultimodal")
+    record = EpisodicMemory(
+        content="Multimodal fallback record",
+        session_id="session-multimodal-fallback",
+        modality="multimodal",
+        media_ref=media_path,
+        media_type="pdf",
+        source_mime_type="application/pdf",
+        text_description="Fallback to text if multimodal embedding fails",
+    )
+
+    store.store(record)
+
+    assert record.metadata["embedding_strategy"] == "text_fallback"
+    assert "provider rejected multimodal payload" in record.metadata["media_embed_error"]
+    print("  PASS  multimodal embed failures preserve the episodic record via text fallback")
 
 
 def test_bad_emotional_profile_metadata_defaults_to_empty_dict():

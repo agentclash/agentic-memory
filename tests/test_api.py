@@ -14,6 +14,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from api.app import create_app
 from models.base import normalize_modality
 from stores.episodic_store import EpisodicStoreError
+from utils.embeddings import EmbeddingProviderError
 from tests.helpers import HashingEmbedder
 
 
@@ -25,7 +26,7 @@ def make_client(*, media_root: str | None = None) -> httpx.AsyncClient:
         allowed_origins=["http://localhost:3000"],
         embedder=HashingEmbedder(),
     )
-    transport = httpx.ASGITransport(app=app)
+    transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
     client = httpx.AsyncClient(transport=transport, base_url="http://testserver")
     client.app = app
     return client
@@ -49,34 +50,46 @@ async def test_store_semantic_and_query_mixed_results():
 
 @pytest.mark.anyio
 async def test_store_semantic_memory_round_trips_media_contract():
-    async with make_client() as client:
-        create = await client.post(
-            "/api/memories/semantic",
-            json={
-                "content": "Architecture diagram for retrieval flow",
-                "modality": "image",
-                "media_ref": "/tmp/diagram.png",
-                "media_type": "image",
-                "text_description": "Whiteboard sketch of the retrieval stack",
-            },
-        )
-        query = await client.post("/api/retrieval/query", json={"query": "architecture diagram", "top_k": 1})
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    fd, source_path = tempfile.mkstemp(suffix=".png", prefix="semantic_api_source_")
+    os.close(fd)
+    Path(source_path).write_bytes(b"semantic-image")
+    try:
+        async with make_client(media_root=media_root) as client:
+            create = await client.post(
+                "/api/memories/semantic",
+                json={
+                    "content": "Architecture diagram for retrieval flow",
+                    "modality": "image",
+                    "media_ref": source_path,
+                    "media_type": "image",
+                    "text_description": "Whiteboard sketch of the retrieval stack",
+                },
+            )
+            query = await client.post("/api/retrieval/query", json={"query": "architecture diagram", "top_k": 1})
 
-    assert create.status_code == 200
-    created = create.json()["record"]
-    assert created["modality"] == "image"
-    assert created["media_ref"] == "/tmp/diagram.png"
-    assert created["media_type"] == "image"
-    assert created["text_description"] == "Whiteboard sketch of the retrieval stack"
-    assert created["has_media"] is True
+        assert create.status_code == 200
+        created = create.json()["record"]
+        assert created["modality"] == "image"
+        assert created["media_ref"] == os.path.join(media_root, "images", f"{created['id']}.png")
+        assert created["media_type"] == "image"
+        assert created["text_description"] == "Whiteboard sketch of the retrieval stack"
+        assert created["has_media"] is True
+        assert os.path.exists(created["media_ref"])
 
-    assert query.status_code == 200
-    record = query.json()["results"][0]["record"]
-    assert record["modality"] == "image"
-    assert record["media_ref"] == "/tmp/diagram.png"
-    assert record["media_type"] == "image"
-    assert record["text_description"] == "Whiteboard sketch of the retrieval stack"
-    assert record["has_media"] is True
+        assert query.status_code == 200
+        record = query.json()["results"][0]["record"]
+        assert record["modality"] == "image"
+        assert record["media_ref"] == created["media_ref"]
+        assert record["media_type"] == "image"
+        assert record["text_description"] == "Whiteboard sketch of the retrieval stack"
+        assert record["has_media"] is True
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+        try:
+            os.remove(source_path)
+        except FileNotFoundError:
+            pass
 
 
 @pytest.mark.anyio
@@ -185,7 +198,7 @@ async def test_store_file_episode_infers_modality_from_extension_and_mime():
 
 
 @pytest.mark.anyio
-async def test_store_file_episode_rejects_non_pdf_multimodal_upload():
+async def test_store_file_episode_allows_non_pdf_multimodal_upload():
     media_root = tempfile.mkdtemp(prefix="memory_api_media_")
     try:
         async with make_client(media_root=media_root) as client:
@@ -195,10 +208,76 @@ async def test_store_file_episode_rejects_non_pdf_multimodal_upload():
                 files={"file": ("clip.mp3", b"fake-audio", "audio/mpeg")},
             )
 
-        assert response.status_code == 400
-        assert response.json()["detail"] == "multimodal file uploads currently require a PDF file"
+        assert response.status_code == 200
+        assert response.json()["record"]["modality"] == "multimodal"
+        assert response.json()["record"]["media_type"] == "audio"
     finally:
         shutil.rmtree(media_root, ignore_errors=True)
+
+
+@pytest.mark.anyio
+async def test_multimodal_file_upload_rejects_unsupported_file_type():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    try:
+        async with make_client(media_root=media_root) as client:
+            response = await client.post(
+                "/api/memories/episodic/file",
+                data={"session_id": "session-multimodal", "modality": "multimodal"},
+                files={"file": ("archive.tar.gz", b"bad-archive", "application/gzip")},
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "multimodal file uploads require a supported image, audio, video, or PDF file"
+        )
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+
+
+@pytest.mark.anyio
+async def test_semantic_memory_requires_media_ref_for_non_text_modalities():
+    async with make_client() as client:
+        response = await client.post(
+            "/api/memories/semantic",
+            json={
+                "content": "Bad semantic media contract",
+                "modality": "image",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "media_ref is required when modality is not text"
+
+
+@pytest.mark.anyio
+async def test_semantic_memory_rejects_modality_media_type_mismatch():
+    async with make_client() as client:
+        response = await client.post(
+            "/api/memories/semantic",
+            json={
+                "content": "Bad semantic modality contract",
+                "modality": "image",
+                "media_ref": "clip.mp3",
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "media_type 'audio' does not match modality 'image'"
+
+
+@pytest.mark.anyio
+async def test_semantic_memory_rejects_invalid_related_ids():
+    async with make_client() as client:
+        response = await client.post(
+            "/api/memories/semantic",
+            json={
+                "content": "Bad semantic relation payload",
+                "related_ids": ["ok", 123],
+            },
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "related_ids must contain only strings"
 
 
 @pytest.mark.anyio
@@ -278,6 +357,119 @@ async def test_failed_file_episode_write_cleans_up_owned_media():
         assert not any(path.is_file() for path in Path(media_root).rglob("*"))
     finally:
         shutil.rmtree(media_root, ignore_errors=True)
+
+
+@pytest.mark.anyio
+async def test_failed_semantic_write_cleans_up_owned_media():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    fd, source_path = tempfile.mkstemp(suffix=".png", prefix="semantic_api_source_")
+    os.close(fd)
+    Path(source_path).write_bytes(b"semantic-image")
+    try:
+        async with make_client(media_root=media_root) as client:
+            await client.get("/api/overview")
+            service = client.app.state.service
+
+            def fail_store(record):
+                owned_ref = service.media_store.store(record.media_ref, record.id)
+                record.media_ref = owned_ref
+                raise RuntimeError("synthetic store failure")
+
+            service.semantic_store.store = fail_store
+            response = await client.post(
+                "/api/memories/semantic",
+                json={
+                    "content": "This semantic write should fail",
+                    "modality": "image",
+                    "media_ref": source_path,
+                    "media_type": "image",
+                },
+            )
+
+        assert response.status_code == 500
+        assert not any(path.is_file() for path in Path(media_root).rglob("*"))
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+        try:
+            os.remove(source_path)
+        except FileNotFoundError:
+            pass
+
+
+@pytest.mark.anyio
+async def test_bad_request_semantic_write_cleans_up_owned_media():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    fd, source_path = tempfile.mkstemp(suffix=".png", prefix="semantic_api_source_")
+    os.close(fd)
+    Path(source_path).write_bytes(b"semantic-image")
+    try:
+        async with make_client(media_root=media_root) as client:
+            await client.get("/api/overview")
+            service = client.app.state.service
+
+            def fail_store(record):
+                owned_ref = service.media_store.store(record.media_ref, record.id)
+                record.media_ref = owned_ref
+                raise ValueError("synthetic validation failure")
+
+            service.semantic_store.store = fail_store
+            response = await client.post(
+                "/api/memories/semantic",
+                json={
+                    "content": "This semantic write should fail with a 400",
+                    "modality": "image",
+                    "media_ref": source_path,
+                    "media_type": "image",
+                },
+            )
+
+        assert response.status_code == 400
+        assert response.json()["detail"] == "synthetic validation failure"
+        assert not any(path.is_file() for path in Path(media_root).rglob("*"))
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+        try:
+            os.remove(source_path)
+        except FileNotFoundError:
+            pass
+
+
+@pytest.mark.anyio
+async def test_semantic_provider_failure_returns_502_and_cleans_up_owned_media():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    fd, source_path = tempfile.mkstemp(suffix=".png", prefix="semantic_api_source_")
+    os.close(fd)
+    Path(source_path).write_bytes(b"semantic-image")
+    try:
+        async with make_client(media_root=media_root) as client:
+            await client.get("/api/overview")
+            service = client.app.state.service
+
+            def fail_store(record):
+                owned_ref = service.media_store.store(record.media_ref, record.id)
+                record.media_ref = owned_ref
+                raise EmbeddingProviderError("Gemini embedding provider failed after retries")
+
+            service.semantic_store.store = fail_store
+            response = await client.post(
+                "/api/memories/semantic",
+                json={
+                    "content": "This semantic write should fail with a provider error",
+                    "modality": "image",
+                    "media_ref": source_path,
+                    "media_type": "image",
+                },
+            )
+
+        assert response.status_code == 502
+        assert response.json()["detail"] == "Gemini embedding provider failed after retries"
+        assert not any(path.is_file() for path in Path(media_root).rglob("*"))
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+        try:
+            os.remove(source_path)
+        except FileNotFoundError:
+            pass
 
 
 @pytest.mark.anyio

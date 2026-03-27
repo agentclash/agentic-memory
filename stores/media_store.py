@@ -10,20 +10,51 @@ _EXTENSION_DIRECTORIES = {
     ".jpg": "images",
     ".jpeg": "images",
     ".webp": "images",
-    ".gif": "images",
-    ".bmp": "images",
+    ".heic": "images",
+    ".heif": "images",
     ".mp3": "audio",
     ".wav": "audio",
-    ".m4a": "audio",
+    ".aif": "audio",
+    ".aiff": "audio",
     ".aac": "audio",
     ".flac": "audio",
     ".ogg": "audio",
     ".mp4": "video",
+    ".mpeg": "video",
+    ".mpg": "video",
     ".mov": "video",
-    ".mkv": "video",
-    ".webm": "video",
     ".avi": "video",
+    ".flv": "video",
+    ".webm": "video",
+    ".wmv": "video",
+    ".3gp": "video",
     ".pdf": "documents",
+}
+
+_EXTENSION_MEDIA_TYPES = {
+    ".png": "image",
+    ".jpg": "image",
+    ".jpeg": "image",
+    ".webp": "image",
+    ".heic": "image",
+    ".heif": "image",
+    ".mp3": "audio",
+    ".wav": "audio",
+    ".aif": "audio",
+    ".aiff": "audio",
+    ".aac": "audio",
+    ".flac": "audio",
+    ".ogg": "audio",
+    ".mp4": "video",
+    ".mpeg": "video",
+    ".mpg": "video",
+    ".mov": "video",
+    ".avi": "video",
+    ".flv": "video",
+    ".webm": "video",
+    ".wmv": "video",
+    ".3gp": "video",
+    ".pdf": "pdf",
 }
 
 
@@ -60,6 +91,45 @@ class MediaStore:
         if not path.exists():
             raise FileNotFoundError(f"Stored media not found: {path}")
         return str(path)
+
+    def ensure_owned(self, media_ref: str | Path | None, memory_id: str) -> tuple[str | None, bool]:
+        if not media_ref:
+            return None, False
+        if self.owns(media_ref):
+            return str(media_ref), False
+
+        owned_media_ref = self.store(media_ref, memory_id)
+        return owned_media_ref, True
+
+    def owns(self, media_ref: str | Path) -> bool:
+        try:
+            self._validate_owned(media_ref)
+            return True
+        except ValueError:
+            return False
+
+    @staticmethod
+    def resolve_media_type(media_ref: str | Path, media_type: str | None = None) -> str:
+        if media_type in {"image", "audio", "video", "pdf"}:
+            return media_type
+
+        path = Path(media_ref)
+        suffix = path.suffix.lower()
+        if suffix in _EXTENSION_MEDIA_TYPES:
+            return _EXTENSION_MEDIA_TYPES[suffix]
+
+        guessed_mime = mimetypes.guess_type(path.name)[0]
+        if guessed_mime:
+            if guessed_mime.startswith("image/"):
+                return "image"
+            if guessed_mime.startswith("audio/"):
+                return "audio"
+            if guessed_mime.startswith("video/"):
+                return "video"
+            if guessed_mime == "application/pdf":
+                return "pdf"
+
+        raise ValueError(f"Unsupported media file type for {path.name}")
 
     def delete(self, media_ref: str | Path) -> None:
         path = self._validate_owned(media_ref)
