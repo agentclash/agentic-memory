@@ -15,14 +15,12 @@ _MEDIA_EMBED_METHODS = {
     "image": "embed_image",
     "audio": "embed_audio",
     "video": "embed_video",
-    "pdf": "embed_pdf",
 }
 
 _DEFAULT_MIME_TYPES = {
     "image": "image/png",
     "audio": "audio/mpeg",
     "video": "video/mp4",
-    "pdf": "application/pdf",
 }
 
 
@@ -71,6 +69,7 @@ class EpisodicStore(BaseStore):
                 "memory_type": record.memory_type,
                 "content": record.content,
                 "modality": record.modality,
+                "has_media": record.has_media,
                 "importance": record.importance,
                 "session_id": record.session_id,
                 **({"media_ref": record.media_ref} if record.media_ref else {}),
@@ -158,9 +157,9 @@ class EpisodicStore(BaseStore):
         if record.modality == "text" or not record.media_ref:
             return self._embedder.embed_text(self._fallback_text(record))
 
-        embed_method_name = _MEDIA_EMBED_METHODS.get(record.modality)
+        embed_method_name, mime_type = self._resolve_media_embedding(record)
         embed_method = getattr(self._embedder, embed_method_name, None) if embed_method_name else None
-        if embed_method is None:
+        if embed_method is None or mime_type is None:
             return self._embedder.embed_text(self._fallback_text(record))
 
         media_path = Path(record.media_ref)
@@ -177,7 +176,6 @@ class EpisodicStore(BaseStore):
                 f"limit_bytes={self._max_media_bytes} path={record.media_ref}"
             )
 
-        mime_type = record.source_mime_type or _DEFAULT_MIME_TYPES.get(record.modality, "application/octet-stream")
         try:
             return embed_method(
                 str(media_path),
@@ -212,6 +210,21 @@ class EpisodicStore(BaseStore):
             parts.append(" ".join(record.participants))
         return "\n".join(part for part in parts if part)
 
+    def _resolve_media_embedding(self, record: EpisodicMemory) -> tuple[str | None, str | None]:
+        if record.modality == "multimodal":
+            if record.media_type == "pdf" or record.source_mime_type == "application/pdf":
+                return "embed_pdf", record.source_mime_type or "application/pdf"
+            return None, None
+
+        embed_method_name = _MEDIA_EMBED_METHODS.get(record.modality)
+        if embed_method_name is None:
+            return None, None
+        mime_type = record.source_mime_type or _DEFAULT_MIME_TYPES.get(
+            record.modality,
+            "application/octet-stream",
+        )
+        return embed_method_name, mime_type
+
     def _to_metadata(self, record: EpisodicMemory) -> dict:
         return {
             "memory_type": record.memory_type,
@@ -229,6 +242,7 @@ class EpisodicStore(BaseStore):
             "summary": record.summary or "",
             "has_emotional_valence": record.emotional_valence is not None,
             "emotional_valence": record.emotional_valence if record.emotional_valence is not None else 0.0,
+            "emotional_profile_json": json.dumps(record.emotional_profile, sort_keys=True),
             "media_ref": record.media_ref or "",
             "media_type": record.media_type or "",
             "text_description": record.text_description or "",
@@ -286,6 +300,10 @@ class EpisodicStore(BaseStore):
             emotional_valence=(
                 float(meta["emotional_valence"]) if meta.get("has_emotional_valence") else None
             ),
+            emotional_profile={
+                key: float(value)
+                for key, value in json.loads(meta.get("emotional_profile_json", "{}")).items()
+            },
             media_ref=meta.get("media_ref") or None,
             media_type=meta.get("media_type") or None,
             text_description=meta.get("text_description") or None,

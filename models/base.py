@@ -3,6 +3,20 @@ from datetime import datetime, timezone
 from typing import Optional
 import uuid
 
+ALLOWED_MODALITIES = {"text", "image", "audio", "video", "multimodal"}
+_LEGACY_MODALITY_ALIASES = {
+    "pdf": "multimodal",
+}
+
+
+def normalize_modality(modality: str | None) -> str:
+    resolved = (modality or "text").strip().lower()
+    resolved = _LEGACY_MODALITY_ALIASES.get(resolved, resolved)
+    if resolved not in ALLOWED_MODALITIES:
+        supported = ", ".join(sorted(ALLOWED_MODALITIES))
+        raise ValueError(f"Unsupported modality '{modality}'. Supported values: {supported}")
+    return resolved
+
 
 @dataclass(kw_only=True)
 class MemoryRecord:
@@ -25,3 +39,10 @@ class MemoryRecord:
     media_ref: Optional[str] = None
     media_type: Optional[str] = None
     text_description: Optional[str] = None
+
+    def __post_init__(self) -> None:
+        self.modality = normalize_modality(self.modality)
+
+    @property
+    def has_media(self) -> bool:
+        return bool(self.media_ref)

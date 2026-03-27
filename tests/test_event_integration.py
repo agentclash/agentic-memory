@@ -93,6 +93,7 @@ def test_semantic_store_emits_memory_stored():
         assert event.data["memory_type"] == "semantic"
         assert event.data["content"] == record.content
         assert event.data["modality"] == "text"
+        assert event.data["has_media"] is False
         assert event.data["importance"] == 0.8
         print("  PASS  SemanticStore emits memory.stored after persistence")
     finally:
@@ -153,6 +154,7 @@ def test_episodic_store_emits_media_context_in_memory_stored():
         event = recorder.events[0]
         assert event.data["memory_type"] == "episodic"
         assert event.data["modality"] == "image"
+        assert event.data["has_media"] is True
         assert event.data["media_ref"] == media_path
         print("  PASS  EpisodicStore emits modality and media_ref for stored media episodes")
     finally:

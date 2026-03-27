@@ -80,6 +80,7 @@ def test_model_defaults():
     assert str(uuid.UUID(record.session_id)) == record.session_id
     assert record.turn_number is None
     assert record.participants == ["user", "agent"]
+    assert record.emotional_profile == {}
     print("  PASS  EpisodicMemory defaults to episodic with sane field defaults")
 
 
@@ -93,6 +94,7 @@ def test_text_episode_round_trip():
         participants=["atharva", "codex"],
         summary="Fixed a scoring regression",
         emotional_valence=0.6,
+        emotional_profile={"joy": 0.8, "confidence": 0.4},
         created_at=created_at,
         importance=0.9,
     )
@@ -107,6 +109,7 @@ def test_text_episode_round_trip():
     assert loaded.participants == ["atharva", "codex"]
     assert loaded.summary == "Fixed a scoring regression"
     assert loaded.emotional_valence == 0.6
+    assert loaded.emotional_profile == {"joy": 0.8, "confidence": 0.4}
     assert loaded.created_at == created_at
     assert loaded.importance == 0.9
     assert loaded.modality == "text"
@@ -132,6 +135,7 @@ def test_store_emits_memory_stored_on_success():
     assert event.data["memory_type"] == "episodic"
     assert event.data["content"] == record.content
     assert event.data["modality"] == "text"
+    assert event.data["has_media"] is False
     assert event.data["importance"] == 0.8
     assert event.data["session_id"] == "session-success"
     print("  PASS  EpisodicStore emits memory.stored after successful persistence")
@@ -145,6 +149,7 @@ def test_media_backed_episode_round_trip():
         session_id="session-media",
         modality="image",
         media_ref=media_path,
+        media_type="image",
         source_mime_type="image/png",
         text_description="CI output showing a dependency resolution error",
     )
@@ -157,6 +162,7 @@ def test_media_backed_episode_round_trip():
     assert loaded.session_id == "session-media"
     assert loaded.modality == "image"
     assert loaded.media_ref == media_path
+    assert loaded.media_type == "image"
     assert loaded.source_mime_type == "image/png"
     assert loaded.text_description == "CI output showing a dependency resolution error"
     print("  PASS  media-backed episodic records preserve multimodal metadata")
