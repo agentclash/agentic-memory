@@ -98,6 +98,9 @@ class EpisodicStore(BaseStore):
             return None
         return self._from_result(result, 0)
 
+    def get_all_records(self, include_embeddings: bool = False) -> list[EpisodicMemory]:
+        return self._all_records(include_embeddings=include_embeddings)
+
     def retrieve(self, query: str, top_k: int = 5) -> list[tuple[EpisodicMemory, float]]:
         query_embedding = self._embedder.embed_query(query)
         return self.retrieve_by_vector(query_embedding, top_k=top_k)
@@ -171,6 +174,19 @@ class EpisodicStore(BaseStore):
         meta["access_count"] = int(meta.get("access_count", 0)) + 1
         meta["last_accessed_at"] = now.isoformat()
         self._collection.update(ids=[record_id], metadatas=[meta])
+
+    def delete(self, record_id: str) -> None:
+        self._collection.delete(ids=[record_id])
+
+    def replace(self, record: EpisodicMemory) -> None:
+        if record.embedding is None:
+            raise ValueError("replace(record) requires record.embedding to be set")
+        self._collection.update(
+            ids=[record.id],
+            embeddings=[record.embedding],
+            documents=[record.content],
+            metadatas=[self._to_metadata(record)],
+        )
 
     def _embed_record(self, record: EpisodicMemory) -> list[float]:
         if record.modality == "text" or not record.media_ref:

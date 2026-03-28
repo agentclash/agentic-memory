@@ -255,6 +255,50 @@ def test_media_backed_episode_uses_path_based_embedder_interface():
     print("  PASS  episodic media writes call the path-based embedder interface")
 
 
+def test_get_all_records_returns_records_without_embeddings_by_default():
+    store, _ = fresh_setup()
+    first = EpisodicMemory(content="First event", session_id="session-a")
+    second = EpisodicMemory(content="Second event", session_id="session-b")
+    store.store(first)
+    store.store(second)
+
+    records = store.get_all_records()
+
+    assert {record.id for record in records} == {first.id, second.id}
+    assert all(record.embedding is None for record in records)
+    print("  PASS  episodic scan returns every record and omits embeddings by default")
+
+
+def test_episodic_delete_is_idempotent_and_replace_preserves_embedding():
+    embedder = RecordingMediaEmbedder()
+    store, _ = fresh_setup(embedder=embedder)
+    record = EpisodicMemory(
+        content="Original event",
+        session_id="session-replace",
+        summary="Before",
+        importance=0.8,
+    )
+    store.store(record)
+    original_embedding = list(record.embedding)
+
+    record.content = "Updated event"
+    record.summary = "After"
+    record.importance = 0.2
+    store.replace(record)
+    loaded = store.get_by_id(record.id)
+    store.delete("missing-id")
+    store.delete(record.id)
+
+    assert embedder.calls == []
+    assert loaded is not None
+    assert loaded.content == "Updated event"
+    assert loaded.summary == "After"
+    assert loaded.importance == 0.2
+    assert loaded.embedding == original_embedding
+    assert store.get_by_id(record.id) is None
+    print("  PASS  episodic replace rewrites metadata without re-embedding and delete is idempotent")
+
+
 def test_pdf_backed_multimodal_episode_uses_multimodal_embedder():
     embedder = RecordingMediaEmbedder()
     store, _ = fresh_setup(embedder=embedder)
@@ -668,6 +712,8 @@ if __name__ == "__main__":
         test_store_emits_memory_stored_on_success()
         test_media_backed_episode_round_trip()
         test_media_backed_episode_uses_path_based_embedder_interface()
+        test_get_all_records_returns_records_without_embeddings_by_default()
+        test_episodic_delete_is_idempotent_and_replace_preserves_embedding()
         test_get_by_session_orders_by_turn_number_then_created_at()
         test_get_by_session_filters_across_sessions()
         test_get_recent_returns_newest_first_across_sessions()

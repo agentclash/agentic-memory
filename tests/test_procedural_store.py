@@ -234,6 +234,50 @@ def test_record_outcome_missing_record_is_a_no_op():
     print("  PASS  missing procedural ids are ignored during outcome writes")
 
 
+def test_get_all_records_returns_records_without_embeddings_by_default():
+    store, _ = fresh_setup()
+    first = ProceduralMemory(content="First procedure", steps=["One"])
+    second = ProceduralMemory(content="Second procedure", steps=["Two"])
+    store.store(first)
+    store.store(second)
+
+    records = store.get_all_records()
+
+    assert {record.id for record in records} == {first.id, second.id}
+    assert all(record.embedding is None for record in records)
+    print("  PASS  procedural scan returns every record and omits embeddings by default")
+
+
+def test_procedural_delete_is_idempotent_and_replace_preserves_embedding():
+    embedder = RecordingProceduralEmbedder()
+    store, _ = fresh_setup(embedder=embedder)
+    record = ProceduralMemory(
+        content="Deploy to Lambda",
+        steps=["Package", "Deploy"],
+        success_count=1,
+        importance=0.8,
+    )
+    store.store(record)
+    original_embedding = list(record.embedding)
+
+    record.content = "Deploy to Lambda safely"
+    record.importance = 0.4
+    record.failure_count = 2
+    store.replace(record)
+    loaded = store.get_by_id(record.id)
+    store.delete("missing-id")
+    store.delete(record.id)
+
+    assert embedder.calls == []
+    assert loaded is not None
+    assert loaded.content == "Deploy to Lambda safely"
+    assert loaded.importance == 0.4
+    assert loaded.failure_count == 2
+    assert loaded.embedding == original_embedding
+    assert store.get_by_id(record.id) is None
+    print("  PASS  procedural replace rewrites metadata without re-embedding and delete is idempotent")
+
+
 def test_get_best_procedures_reranks_by_wilson_score():
     store, _ = fresh_setup()
     sam = ProceduralMemory(
@@ -313,6 +357,8 @@ if __name__ == "__main__":
         test_media_backed_procedure_round_trip_uses_combined_embedding_path()
         test_record_outcome_rewrites_metadata_without_reembedding()
         test_record_outcome_missing_record_is_a_no_op()
+        test_get_all_records_returns_records_without_embeddings_by_default()
+        test_procedural_delete_is_idempotent_and_replace_preserves_embedding()
         test_get_best_procedures_reranks_by_wilson_score()
         test_untested_procedures_rank_on_similarity_only()
         test_get_best_procedures_returns_empty_for_empty_store()

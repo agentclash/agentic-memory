@@ -76,6 +76,9 @@ class SemanticStore(BaseStore):
             return None
         return self._from_result(result, 0)
 
+    def get_all_records(self, include_embeddings: bool = False) -> list[SemanticMemory]:
+        return self._all_records(include_embeddings=include_embeddings)
+
     def retrieve(self, query: str, top_k: int = 5) -> list[tuple[SemanticMemory, float]]:
         query_embedding = self._embedder.embed_query(query)
         return self.retrieve_by_vector(query_embedding, top_k=top_k)
@@ -114,6 +117,19 @@ class SemanticStore(BaseStore):
         meta["last_accessed_at"] = now.isoformat()
         self._collection.update(ids=[record_id], metadatas=[meta])
 
+    def delete(self, record_id: str) -> None:
+        self._collection.delete(ids=[record_id])
+
+    def replace(self, record: SemanticMemory) -> None:
+        if record.embedding is None:
+            raise ValueError("replace(record) requires record.embedding to be set")
+        self._collection.update(
+            ids=[record.id],
+            embeddings=[record.embedding],
+            documents=[record.content],
+            metadatas=[self._to_metadata(record)],
+        )
+
     # ── serialisation helpers ──────────────────────────────────────────────
     # ChromaDB metadata must be flat (str/int/float/bool only — no nested dicts).
 
@@ -136,6 +152,16 @@ class SemanticStore(BaseStore):
             "media_type": record.media_type or "",
             "text_description": record.text_description or "",
         }
+
+    def _all_records(self, *, include_embeddings: bool) -> list[SemanticMemory]:
+        include = ["documents", "metadatas"]
+        if include_embeddings:
+            include.insert(0, "embeddings")
+
+        result = self._collection.get(include=include)
+        if not result["ids"]:
+            return []
+        return [self._from_result(result, index) for index in range(len(result["ids"]))]
 
     def _build_record(self, doc: str, id: str, embedding, meta: dict) -> SemanticMemory:
         last_accessed = meta.get("last_accessed_at", "")
@@ -230,9 +256,10 @@ class SemanticStore(BaseStore):
 
     def _from_result(self, result: dict, index: int) -> SemanticMemory:
         """Deserialise from .get() result (flat lists)."""
+        embeddings = result.get("embeddings")
         return self._build_record(
             result["documents"][index], result["ids"][index],
-            result["embeddings"][index], result["metadatas"][index],
+            embeddings[index] if embeddings is not None else None, result["metadatas"][index],
         )
 
     def _from_query_result(self, result: dict, index: int) -> SemanticMemory:

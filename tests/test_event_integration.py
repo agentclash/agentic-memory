@@ -57,11 +57,29 @@ class FakeStore(BaseStore):
     def retrieve(self, query: str, top_k: int = 5):
         return self._results[:top_k]
 
+    def get_all_records(self, include_embeddings: bool = False):
+        records = [record for record, _ in self._results]
+        if include_embeddings:
+            return records
+        return [replace(record, embedding=None) for record in records]
+
     def retrieve_by_vector(self, vector: list[float], top_k: int = 5):
         return self._vector_results[:top_k]
 
     def update_access(self, record_id: str) -> None:
         self.updated_ids.append(record_id)
+
+    def delete(self, record_id: str) -> None:
+        self._results = [(record, score) for record, score in self._results if record.id != record_id]
+        self._vector_results = [
+            (record, score) for record, score in self._vector_results if record.id != record_id
+        ]
+
+    def replace(self, record) -> None:
+        for items in (self._results, self._vector_results):
+            for index, (existing, score) in enumerate(items):
+                if existing.id == record.id:
+                    items[index] = (record, score)
 
     def get_recent(self, n: int):
         return self._recent_records[:n]

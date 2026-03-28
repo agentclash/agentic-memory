@@ -221,6 +221,46 @@ def test_semantic_store_cleans_up_owned_media_on_failure():
     print("  PASS  failed semantic writes clean up owned media")
 
 
+def test_get_all_records_returns_full_collection_without_embeddings_by_default():
+    store, _ = fresh_setup()
+    first = SemanticMemory(content="First fact", importance=0.2)
+    second = SemanticMemory(content="Second fact", importance=0.7)
+    store.store(first)
+    store.store(second)
+
+    records = store.get_all_records()
+
+    assert {record.id for record in records} == {first.id, second.id}
+    assert all(record.embedding is None for record in records)
+    print("  PASS  semantic scan returns every record and omits embeddings by default")
+
+
+def test_semantic_delete_is_idempotent_and_replace_preserves_embedding():
+    embedder = RecordingSemanticEmbedder()
+    store, _ = fresh_setup(embedder=embedder)
+    record = SemanticMemory(content="Original fact", importance=0.9, category="ops")
+    store.store(record)
+    original_embedding = list(record.embedding)
+
+    record.content = "Updated fact"
+    record.importance = 0.3
+    record.supersedes = "old-fact"
+    store.replace(record)
+    loaded = store.get_by_id(record.id)
+    store.delete("missing-id")
+
+    assert embedder.calls == []
+    assert loaded is not None
+    assert loaded.content == "Updated fact"
+    assert loaded.importance == 0.3
+    assert loaded.supersedes == "old-fact"
+    assert loaded.embedding == original_embedding
+
+    store.delete(record.id)
+    assert store.get_by_id(record.id) is None
+    print("  PASS  semantic replace rewrites metadata without re-embedding and delete is idempotent")
+
+
 def test_retrieve_by_vector_supports_image_embedding_against_text_memory():
     embedder = DeterministicMultimodalEmbedder()
     store, _ = fresh_setup(embedder=embedder)
@@ -243,5 +283,7 @@ if __name__ == "__main__":
     test_image_semantic_write_copies_media_and_uses_owned_path()
     test_multimodal_semantic_write_stores_one_vector_and_round_trips()
     test_semantic_store_cleans_up_owned_media_on_failure()
+    test_get_all_records_returns_full_collection_without_embeddings_by_default()
+    test_semantic_delete_is_idempotent_and_replace_preserves_embedding()
     test_retrieve_by_vector_supports_image_embedding_against_text_memory()
     print("\nAll tests passed.")
