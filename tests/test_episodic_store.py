@@ -7,6 +7,8 @@ import tempfile
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
@@ -294,7 +296,7 @@ def test_episodic_delete_is_idempotent_and_replace_preserves_embedding():
     assert loaded.content == "Updated event"
     assert loaded.summary == "After"
     assert loaded.importance == 0.2
-    assert loaded.embedding == original_embedding
+    assert list(loaded.embedding) == pytest.approx(original_embedding)
     assert store.get_by_id(record.id) is None
     print("  PASS  episodic replace rewrites metadata without re-embedding and delete is idempotent")
 

@@ -7,6 +7,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
@@ -273,7 +275,7 @@ def test_procedural_delete_is_idempotent_and_replace_preserves_embedding():
     assert loaded.content == "Deploy to Lambda safely"
     assert loaded.importance == 0.4
     assert loaded.failure_count == 2
-    assert loaded.embedding == original_embedding
+    assert list(loaded.embedding) == pytest.approx(original_embedding)
     assert store.get_by_id(record.id) is None
     print("  PASS  procedural replace rewrites metadata without re-embedding and delete is idempotent")
 

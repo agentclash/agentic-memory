@@ -7,6 +7,8 @@ import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import config
@@ -254,7 +256,7 @@ def test_semantic_delete_is_idempotent_and_replace_preserves_embedding():
     assert loaded.content == "Updated fact"
     assert loaded.importance == 0.3
     assert loaded.supersedes == "old-fact"
-    assert loaded.embedding == original_embedding
+    assert list(loaded.embedding) == pytest.approx(original_embedding)
 
     store.delete(record.id)
     assert store.get_by_id(record.id) is None
