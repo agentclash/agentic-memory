@@ -98,6 +98,18 @@ async def test_query_endpoint_rejects_invalid_memory_types():
 
 
 @pytest.mark.anyio
+async def test_query_endpoint_rejects_non_list_memory_types():
+    async with make_client() as client:
+        response = await client.post(
+            "/api/retrieval/query",
+            json={"query": "Docker", "memory_types": "procedural"},
+        )
+
+    assert response.status_code == 400
+    assert response.json()["detail"] == "memory_types must be an array of strings"
+
+
+@pytest.mark.anyio
 async def test_store_procedural_memory_and_record_outcome_via_api():
     async with make_client() as client:
         create = await client.post(
