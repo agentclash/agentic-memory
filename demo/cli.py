@@ -8,9 +8,11 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from events import ConsoleLogger, EventBus
 from models.episodic import EpisodicMemory
+from models.procedural import ProceduralMemory
 from models.semantic import SemanticMemory
 from stores.episodic_store import EpisodicStore
 from stores.media_store import MediaStore
+from stores.procedural_store import ProceduralStore
 from stores.semantic_store import SemanticStore
 from retrieval.retriever import UnifiedRetriever
 from utils.embeddings import GeminiEmbedder, TextEmbedder
@@ -38,6 +40,10 @@ def _make_episodic_store(event_bus: EventBus | None = None) -> EpisodicStore:
     return EpisodicStore(event_bus=event_bus)
 
 
+def _make_procedural_store(event_bus: EventBus | None = None) -> ProceduralStore:
+    return ProceduralStore(event_bus=event_bus, media_store=_make_media_store())
+
+
 def _make_media_store() -> MediaStore:
     return MediaStore(config.MEDIA_STORAGE_PATH)
 
@@ -51,6 +57,7 @@ def _make_retriever(event_bus: EventBus | None = None) -> UnifiedRetriever:
         stores={
             "semantic": _make_semantic_store(event_bus=event_bus),
             "episodic": _make_episodic_store(event_bus=event_bus),
+            "procedural": _make_procedural_store(event_bus=event_bus),
         },
         event_bus=event_bus,
     )
@@ -79,6 +86,12 @@ def _infer_media_type(path: str) -> str:
     return MediaStore.resolve_media_type(path)
 
 
+def _infer_file_contract(path: str) -> tuple[str, str]:
+    media_type = _infer_media_type(path)
+    modality = "multimodal" if media_type == "pdf" else media_type
+    return modality, media_type
+
+
 def _print_ranked_results(results) -> None:
     for rank, result in enumerate(results, 1):
         age = result.record.created_at.strftime("%Y-%m-%d %H:%M")
@@ -96,6 +109,17 @@ def _print_ranked_results(results) -> None:
             f"accessed={result.record.access_count}x  "
             f"sim={result.raw_similarity:.4f}  rec={result.recency_score:.4f}  "
             f"imp={result.importance_score:.2f}{media_context}"
+        )
+
+
+def _print_best_procedures(results) -> None:
+    for rank, result in enumerate(results, 1):
+        print(
+            f"  {rank}. [{result['combined_score']:.4f}] {result['record'].content}\n"
+            f"     similarity={result['similarity']:.4f}  "
+            f"wilson={result['wilson_score']:.4f}  "
+            f"success={result['record'].success_count}  "
+            f"failure={result['record'].failure_count}"
         )
 
 
@@ -193,6 +217,76 @@ def cmd_query(args):
     _print_ranked_results(results)
 
 
+def cmd_store_procedure(args):
+    bus = _make_bus()
+    store = _make_procedural_store(event_bus=bus)
+    media_store = _make_media_store() if args.file else None
+
+    modality = "text"
+    media_type = None
+    if args.file:
+        source_path = os.path.abspath(args.file)
+        inferred_modality, inferred_media_type = _infer_file_contract(source_path)
+        modality = args.modality or inferred_modality
+        media_type = args.media_type or inferred_media_type
+        if args.modality and inferred_modality != args.modality and args.modality != "multimodal":
+            _exit_with_error("uploaded file does not match the requested modality")
+
+    record = ProceduralMemory(
+        content=args.content,
+        steps=args.steps,
+        preconditions=args.preconditions or [],
+        modality=modality,
+        media_type=media_type,
+        text_description=args.text_description,
+    )
+    if args.file:
+        record.media_ref = media_store.store(os.path.abspath(args.file), record.id)
+
+    try:
+        record_id = store.store(record)
+    except Exception:
+        if media_store is not None and record.media_ref:
+            media_store.delete(record.media_ref)
+        raise
+    print(f"Stored procedure [{record_id[:8]}]: {record.content}")
+
+
+def cmd_record_outcome(args):
+    bus = _make_bus()
+    store = _make_procedural_store(event_bus=bus)
+    success = bool(args.success)
+    store.record_outcome(args.record_id, success)
+    record = store.get_by_id(args.record_id)
+    if record is None:
+        print(f"Procedure not found: {args.record_id}")
+        return
+    print(
+        f"Updated [{record.id[:8]}]: success={record.success_count} "
+        f"failure={record.failure_count} wilson={record.wilson_score:.4f}"
+    )
+
+
+def cmd_best_procedure(args):
+    bus = _make_bus()
+    store = _make_procedural_store(event_bus=bus)
+    results = store.get_best_procedure_matches(args.task, top_k=args.top_k)
+    if not results:
+        print("No procedures found.")
+        return
+    _print_best_procedures(
+        [
+            {
+                "record": match.record,
+                "similarity": match.similarity,
+                "wilson_score": match.wilson_score,
+                "combined_score": match.combined_score,
+            }
+            for match in results
+        ]
+    )
+
+
 def cmd_recent(args):
     bus = _make_bus()
     retriever = _make_retriever(event_bus=bus)
@@ -231,7 +325,7 @@ def main():
     query_image_p.add_argument(
         "--memory-types",
         nargs="+",
-        choices=["semantic", "episodic"],
+        choices=["semantic", "episodic", "procedural"],
         help="Optional memory type filter",
     )
 
@@ -241,7 +335,7 @@ def main():
     query_audio_p.add_argument(
         "--memory-types",
         nargs="+",
-        choices=["semantic", "episodic"],
+        choices=["semantic", "episodic", "procedural"],
         help="Optional memory type filter",
     )
 
@@ -265,6 +359,36 @@ def main():
         help="Optional human-readable description for file-backed episodes",
     )
 
+    procedure_p = sub.add_parser("store-procedure", help="Store a new procedural memory")
+    procedure_p.add_argument("content", help="Task description for the procedure")
+    procedure_p.add_argument("--steps", nargs="+", required=True, help="Ordered procedural steps")
+    procedure_p.add_argument("--preconditions", nargs="+", help="Optional preconditions")
+    procedure_p.add_argument("--file", help="Optional supporting media file")
+    procedure_p.add_argument(
+        "--modality",
+        choices=["audio", "image", "video", "multimodal"],
+        help="Optional modality override for file-backed procedures",
+    )
+    procedure_p.add_argument(
+        "--media-type",
+        choices=["image", "audio", "video", "pdf"],
+        help="Optional media type override for multimodal file-backed procedures",
+    )
+    procedure_p.add_argument(
+        "--text-description",
+        help="Optional description of what the supporting media shows",
+    )
+
+    outcome_p = sub.add_parser("record-outcome", help="Record a procedural outcome")
+    outcome_p.add_argument("record_id", help="Procedural memory id")
+    outcome_group = outcome_p.add_mutually_exclusive_group(required=True)
+    outcome_group.add_argument("--success", action="store_true", help="Record a successful outcome")
+    outcome_group.add_argument("--failure", action="store_true", help="Record a failed outcome")
+
+    best_p = sub.add_parser("best-procedure", help="Retrieve the best procedures for a task")
+    best_p.add_argument("task", help="Task description")
+    best_p.add_argument("-k", "--top-k", type=int, default=3, help="Number of results")
+
     recent_p = sub.add_parser("recent", help="Show recent episodic memories")
     recent_p.add_argument("n", type=int, help="Number of recent episodes to show")
 
@@ -286,6 +410,21 @@ def main():
         if args.modality != "multimodal" and args.media_type:
             parser.error("--media-type is only supported when --modality multimodal")
         cmd_store_episode(args)
+    elif args.command == "store-procedure":
+        if args.media_type and not args.file:
+            parser.error("--media-type is only valid when using --file")
+        if args.modality and not args.file:
+            parser.error("--modality is only valid when using --file")
+        if args.text_description and not args.file:
+            parser.error("--text-description is only valid when using --file")
+        if args.modality != "multimodal" and args.media_type:
+            parser.error("--media-type is only supported when --modality multimodal")
+        cmd_store_procedure(args)
+    elif args.command == "record-outcome":
+        args.success = not args.failure
+        cmd_record_outcome(args)
+    elif args.command == "best-procedure":
+        cmd_best_procedure(args)
     elif args.command == "recent":
         cmd_recent(args)
 

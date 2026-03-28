@@ -10,8 +10,10 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import shutil
 import config
 from models.episodic import EpisodicMemory
+from models.procedural import ProceduralMemory
 from models.semantic import SemanticMemory
 from stores.episodic_store import EpisodicStore
+from stores.procedural_store import ProceduralStore
 from stores.semantic_store import SemanticStore
 from retrieval.retriever import UnifiedRetriever
 from tests.helpers import DeterministicMultimodalEmbedder, HashingEmbedder
@@ -36,8 +38,15 @@ def fresh_mixed_setup():
     config.CHROMA_DB_PATH = db_path
     semantic_store = SemanticStore(embedder=HashingEmbedder())
     episodic_store = EpisodicStore(embedder=HashingEmbedder())
-    retriever = UnifiedRetriever(stores={"semantic": semantic_store, "episodic": episodic_store})
-    return semantic_store, episodic_store, retriever, db_path
+    procedural_store = ProceduralStore(embedder=HashingEmbedder())
+    retriever = UnifiedRetriever(
+        stores={
+            "semantic": semantic_store,
+            "episodic": episodic_store,
+            "procedural": procedural_store,
+        }
+    )
+    return semantic_store, episodic_store, procedural_store, retriever, db_path
 
 
 def fresh_vector_setup():
@@ -142,7 +151,7 @@ def test_over_fetch():
 
 
 def test_mixed_store_retrieval():
-    semantic_store, episodic_store, retriever, _ = fresh_mixed_setup()
+    semantic_store, episodic_store, procedural_store, retriever, _ = fresh_mixed_setup()
     now = datetime.now(timezone.utc)
 
     semantic_store.store(
@@ -160,16 +169,24 @@ def test_mixed_store_retrieval():
             importance=0.6,
         )
     )
+    procedural_store.store(
+        ProceduralMemory(
+            content="Deploy the retrieval engine with Docker",
+            steps=["Build the image", "Run docker compose up"],
+            created_at=now,
+            importance=0.6,
+        )
+    )
 
-    results = retriever.query("retrieval engine", top_k=2)
+    results = retriever.query("retrieval engine", top_k=3)
 
-    assert len(results) == 2
-    assert {result.record.memory_type for result in results} == {"semantic", "episodic"}
-    print("  PASS  mixed retrieval returns semantic and episodic records together")
+    assert len(results) == 3
+    assert {result.record.memory_type for result in results} == {"semantic", "episodic", "procedural"}
+    print("  PASS  mixed retrieval returns semantic, episodic, and procedural records together")
 
 
 def test_query_recent_and_time_range_return_episodic_only():
-    semantic_store, episodic_store, retriever, _ = fresh_mixed_setup()
+    semantic_store, episodic_store, _, retriever, _ = fresh_mixed_setup()
     base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
     semantic_store.store(
@@ -203,7 +220,7 @@ def test_query_recent_and_time_range_return_episodic_only():
 
 
 def test_temporal_queries_update_episodic_access_counts():
-    _, episodic_store, retriever, _ = fresh_mixed_setup()
+    _, episodic_store, _, retriever, _ = fresh_mixed_setup()
     record_id = episodic_store.store(
         EpisodicMemory(
             content="Access-tracked episode",

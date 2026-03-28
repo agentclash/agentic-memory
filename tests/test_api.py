@@ -41,12 +41,164 @@ async def test_store_semantic_and_query_mixed_results():
             "/api/memories/episodic/text",
             json={"session_id": "session-a", "text": "We debugged retrieval during a session"},
         )
+        await client.post(
+            "/api/memories/procedural",
+            json={
+                "content": "Deploy retrieval with Docker",
+                "steps": ["Build the image", "Run docker compose up"],
+            },
+        )
 
-        response = await client.post("/api/retrieval/query", json={"query": "retrieval", "top_k": 2})
+        response = await client.post("/api/retrieval/query", json={"query": "retrieval", "top_k": 3})
         data = response.json()
 
     assert response.status_code == 200
-    assert {item["record"]["memory_type"] for item in data["results"]} == {"semantic", "episodic"}
+    assert {item["record"]["memory_type"] for item in data["results"]} == {
+        "semantic",
+        "episodic",
+        "procedural",
+    }
+
+
+@pytest.mark.anyio
+async def test_store_procedural_memory_and_record_outcome_via_api():
+    async with make_client() as client:
+        create = await client.post(
+            "/api/memories/procedural",
+            json={
+                "content": "Deploy to Lambda",
+                "steps": ["Package dependencies", "Run sam deploy"],
+                "preconditions": ["AWS CLI configured"],
+            },
+        )
+        created = create.json()["record"]
+        update = await client.post(
+            f"/api/memories/procedural/{created['id']}/outcome",
+            json={"success": True},
+        )
+
+    assert create.status_code == 200
+    assert created["steps"] == ["Package dependencies", "Run sam deploy"]
+    assert created["preconditions"] == ["AWS CLI configured"]
+    assert created["success_count"] == 0
+    assert created["failure_count"] == 0
+    assert created["wilson_score"] == 0.0
+    assert update.status_code == 200
+    assert update.json()["record"]["success_count"] == 1
+    assert update.json()["record"]["failure_count"] == 0
+
+
+@pytest.mark.anyio
+async def test_best_procedures_endpoint_returns_ranked_results():
+    async with make_client() as client:
+        strong = await client.post(
+            "/api/memories/procedural",
+            json={
+                "content": "Deploy to Lambda via SAM",
+                "steps": ["Package dependencies", "Run sam deploy"],
+            },
+        )
+        weaker = await client.post(
+            "/api/memories/procedural",
+            json={
+                "content": "Deploy to Lambda via Serverless",
+                "steps": ["Package dependencies", "Run serverless deploy"],
+            },
+        )
+        weaker_id = weaker.json()["record"]["id"]
+        for _ in range(9):
+            await client.post(
+                f"/api/memories/procedural/{weaker_id}/outcome",
+                json={"success": True},
+            )
+        for _ in range(6):
+            await client.post(
+                f"/api/memories/procedural/{weaker_id}/outcome",
+                json={"success": False},
+            )
+        strong_id = strong.json()["record"]["id"]
+        for _ in range(9):
+            await client.post(
+                f"/api/memories/procedural/{strong_id}/outcome",
+                json={"success": True},
+            )
+        response = await client.post(
+            "/api/retrieval/best-procedures",
+            json={"task": "deploy to Lambda", "top_k": 2},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert len(payload["results"]) == 2
+    assert payload["results"][0]["record"]["content"] == "Deploy to Lambda via SAM"
+    assert payload["results"][0]["combined_score"] >= payload["results"][1]["combined_score"]
+    assert "similarity" in payload["results"][0]
+    assert "wilson_score" in payload["results"][0]
+
+
+@pytest.mark.anyio
+async def test_store_media_backed_procedure_via_api():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    try:
+        async with make_client(media_root=media_root) as client:
+            response = await client.post(
+                "/api/memories/procedural/file",
+                data={
+                    "content": "Review migration checklist",
+                    "modality": "multimodal",
+                    "media_type": "pdf",
+                    "text_description": "Reference checklist for the migration sequence",
+                },
+                files=[
+                    ("steps", (None, "Open the checklist")),
+                    ("steps", (None, "Validate preconditions")),
+                    ("steps", (None, "Run the migration")),
+                    ("preconditions", (None, "Database backup completed")),
+                    ("file", ("checklist.pdf", b"%PDF-1.4\nchecklist", "application/pdf")),
+                ],
+            )
+
+        assert response.status_code == 200
+        record = response.json()["record"]
+        assert record["modality"] == "multimodal"
+        assert record["media_type"] == "pdf"
+        assert record["has_media"] is True
+        assert record["media_ref"].endswith(os.path.join("documents", f"{record['id']}.pdf"))
+        assert record["steps"] == [
+            "Open the checklist",
+            "Validate preconditions",
+            "Run the migration",
+        ]
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+
+
+@pytest.mark.anyio
+async def test_procedural_api_validation_rejects_empty_steps_and_bad_modalities():
+    media_root = tempfile.mkdtemp(prefix="memory_api_media_")
+    try:
+        async with make_client(media_root=media_root) as client:
+            empty_steps = await client.post(
+                "/api/memories/procedural",
+                json={"content": "Deploy to Lambda", "steps": []},
+            )
+            bad_file = await client.post(
+                "/api/memories/procedural/file",
+                data={"content": "Deploy to Lambda", "modality": "multimodal"},
+                files=[
+                    ("steps", (None, "Package dependencies")),
+                    ("file", ("archive.tar.gz", b"bad-archive", "application/gzip")),
+                ],
+            )
+
+        assert empty_steps.status_code == 400
+        assert empty_steps.json()["detail"] == "steps must contain at least one entry"
+        assert bad_file.status_code == 400
+        assert bad_file.json()["detail"] == (
+            "multimodal file uploads require a supported image, audio, video, or PDF file"
+        )
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
 
 
 @pytest.mark.anyio

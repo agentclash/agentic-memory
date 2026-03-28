@@ -18,10 +18,12 @@ from events.bus import MemoryEvent
 from events import EventBus
 from models.base import MemoryRecord, normalize_modality
 from models.episodic import EpisodicMemory
+from models.procedural import ProceduralMemory
 from models.semantic import SemanticMemory
 from retrieval.retriever import UnifiedRetriever
 from stores.episodic_store import EpisodicStore, EpisodicStoreError, MediaTooLargeError
 from stores.media_store import MediaStore
+from stores.procedural_store import ProceduralMatch, ProceduralStore
 from stores.semantic_store import SemanticStore
 from utils.embeddings import EmbeddingProviderError, GeminiEmbedder, TextEmbedder
 
@@ -141,6 +143,25 @@ def _validate_related_ids(raw_related_ids: Any) -> list[str]:
     return related_ids
 
 
+def _validate_string_list(raw_value: Any, *, field_name: str, required: bool) -> list[str]:
+    if raw_value is None:
+        values: list[Any] = []
+    elif not isinstance(raw_value, list):
+        raise ValueError(f"{field_name} must be an array of strings")
+    else:
+        values = raw_value
+
+    if required and not values:
+        raise ValueError(f"{field_name} must contain at least one entry")
+
+    cleaned: list[str] = []
+    for value in values:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"{field_name} must contain only non-blank strings")
+        cleaned.append(value)
+    return cleaned
+
+
 def _parse_memory_types(raw_value: str | None) -> list[str] | None:
     if raw_value is None:
         return None
@@ -148,7 +169,7 @@ def _parse_memory_types(raw_value: str | None) -> list[str] | None:
     if not values:
         return None
 
-    supported = {"semantic", "episodic"}
+    supported = {"semantic", "episodic", "procedural"}
     invalid = [value for value in values if value not in supported]
     if invalid:
         raise ValueError(
@@ -215,6 +236,18 @@ def _serialise_record(record: MemoryRecord) -> dict[str, Any]:
                 "source_mime_type": record.source_mime_type,
             }
         )
+    if isinstance(record, ProceduralMemory):
+        payload.update(
+            {
+                "steps": record.steps,
+                "preconditions": record.preconditions,
+                "success_count": record.success_count,
+                "failure_count": record.failure_count,
+                "total_outcomes": record.total_outcomes,
+                "success_rate": record.success_rate,
+                "wilson_score": record.wilson_score,
+            }
+        )
     return payload
 
 
@@ -225,6 +258,15 @@ def _serialise_ranked_result(result) -> dict[str, Any]:
         "recency_score": result.recency_score,
         "importance_score": result.importance_score,
         "final_score": result.final_score,
+    }
+
+
+def _serialise_procedural_match(match: ProceduralMatch) -> dict[str, Any]:
+    return {
+        "record": _serialise_record(match.record),
+        "similarity": match.similarity,
+        "wilson_score": match.wilson_score,
+        "combined_score": match.combined_score,
     }
 
 
@@ -272,10 +314,19 @@ class MemoryAPIService:
                 embedder=self.embedder,
                 media_store=self.media_store,
             )
+            self.procedural_store = ProceduralStore(
+                event_bus=self.bus,
+                embedder=self.embedder,
+                media_store=self.media_store,
+            )
         finally:
             config.CHROMA_DB_PATH = original_chroma_path
         self.retriever = UnifiedRetriever(
-            stores={"semantic": self.semantic_store, "episodic": self.episodic_store},
+            stores={
+                "semantic": self.semantic_store,
+                "episodic": self.episodic_store,
+                "procedural": self.procedural_store,
+            },
             event_bus=self.bus,
         )
         self.events = EventRecorder(self.bus)
@@ -302,10 +353,12 @@ class MemoryAPIService:
     def overview(self) -> dict[str, Any]:
         semantic_count = self.semantic_store._collection.count()
         episodic_count = self.episodic_store._collection.count()
+        procedural_count = self.procedural_store._collection.count()
         recent = self.episodic_store.get_recent(5)
         return {
             "semantic_count": semantic_count,
             "episodic_count": episodic_count,
+            "procedural_count": procedural_count,
             "recent_sessions": sorted({record.session_id for record in recent}),
             "latest_events": self.events.snapshot(10),
         }
@@ -488,6 +541,125 @@ def create_app(
             service().media_store.delete(media_ref)
             raise HTTPException(status_code=422, detail=str(exc)) from exc
         return {"record": _serialise_record(record)}
+
+    @app.post("/api/memories/procedural")
+    async def create_procedural_memory(payload: dict[str, Any]) -> dict[str, Any]:
+        if not payload.get("content"):
+            raise HTTPException(status_code=400, detail="content is required")
+        try:
+            steps = _validate_string_list(payload.get("steps"), field_name="steps", required=True)
+            preconditions = _validate_string_list(
+                payload.get("preconditions"),
+                field_name="preconditions",
+                required=False,
+            )
+            record = ProceduralMemory(
+                content=payload["content"],
+                steps=steps,
+                preconditions=preconditions,
+                importance=float(payload.get("importance", 0.5)),
+                source=payload.get("source"),
+                metadata=payload.get("metadata") or {},
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        service().procedural_store.store(record)
+        return {"record": _serialise_record(record)}
+
+    @app.post("/api/memories/procedural/file")
+    async def create_file_procedure(
+        content: str = Form(...),
+        steps: list[str] = Form(...),
+        preconditions: list[str] | None = Form(default=None),
+        modality: str | None = Form(default=None),
+        media_type: str | None = Form(default=None),
+        text_description: str | None = Form(default=None),
+        importance: float = Form(default=0.5),
+        file: UploadFile = File(...),
+    ) -> dict[str, Any]:
+        inferred_contract = _infer_media_contract(mime_type=file.content_type, filename=file.filename)
+        inferred_modality = inferred_contract[0] if inferred_contract else None
+        inferred_media_type = inferred_contract[1] if inferred_contract else None
+        requested_media_type: str | None = None
+        try:
+            parsed_steps = _validate_string_list(steps, field_name="steps", required=True)
+            parsed_preconditions = _validate_string_list(
+                preconditions,
+                field_name="preconditions",
+                required=False,
+            )
+            requested_modality = normalize_modality(modality) if modality is not None else None
+            resolved_modality = requested_modality or normalize_modality(inferred_modality)
+            requested_media_type = _validate_media_type(media_type)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if requested_modality == "multimodal" and inferred_media_type is None and requested_media_type is None:
+            raise HTTPException(
+                status_code=400,
+                detail="multimodal file uploads require a supported image, audio, video, or PDF file",
+            )
+        if (
+            requested_modality is not None
+            and inferred_modality is not None
+            and requested_modality != inferred_modality
+            and requested_modality != "multimodal"
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="uploaded file does not match the requested modality",
+            )
+        if resolved_modality not in _SUPPORTED_FILE_MODALITIES:
+            raise HTTPException(
+                status_code=400,
+                detail="could not infer a supported modality from the uploaded file",
+            )
+        resolved_media_type = requested_media_type or inferred_media_type or resolved_modality
+        record = ProceduralMemory(
+            content=content,
+            steps=parsed_steps,
+            preconditions=parsed_preconditions,
+            modality=resolved_modality,
+            media_type=resolved_media_type,
+            text_description=text_description,
+            importance=importance,
+        )
+        media_ref, _ = service().save_upload(file, record.id)
+        record.media_ref = media_ref
+        try:
+            service().procedural_store.store(record)
+        except (FileNotFoundError, ValueError) as exc:
+            service().media_store.delete(media_ref)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except EmbeddingProviderError as exc:
+            service().media_store.delete(media_ref)
+            raise HTTPException(
+                status_code=502,
+                detail="Gemini embedding provider failed after retries",
+            ) from exc
+        return {"record": _serialise_record(record)}
+
+    @app.post("/api/memories/procedural/{record_id}/outcome")
+    async def record_procedural_outcome(record_id: str, payload: dict[str, Any]) -> dict[str, Any]:
+        if "success" not in payload or not isinstance(payload["success"], bool):
+            raise HTTPException(status_code=400, detail="success must be provided as a boolean")
+        active_service = service()
+        record = active_service.procedural_store.get_by_id(record_id)
+        if record is None:
+            raise HTTPException(status_code=404, detail="procedural memory not found")
+        active_service.procedural_store.record_outcome(record_id, payload["success"])
+        updated = active_service.procedural_store.get_by_id(record_id)
+        return {"record": _serialise_record(updated)}
+
+    @app.post("/api/retrieval/best-procedures")
+    async def best_procedures(payload: dict[str, Any]) -> dict[str, Any]:
+        task = payload.get("task", "").strip()
+        if not task:
+            raise HTTPException(status_code=400, detail="task is required")
+        matches = service().procedural_store.get_best_procedure_matches(
+            task,
+            top_k=int(payload.get("top_k", 3)),
+        )
+        return {"results": [_serialise_procedural_match(match) for match in matches]}
 
     @app.post("/api/retrieval/query")
     async def query(payload: dict[str, Any]) -> dict[str, Any]:

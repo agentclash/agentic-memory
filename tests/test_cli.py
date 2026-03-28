@@ -14,7 +14,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from demo import cli
 from events.bus import EventBus
 from models.episodic import EpisodicMemory
+from models.procedural import ProceduralMemory
 from models.semantic import SemanticMemory
+from stores.procedural_store import ProceduralMatch
 from stores.media_store import MediaStore
 
 
@@ -25,6 +27,31 @@ class RecordingStore:
     def store(self, record):
         self.records.append(record)
         return record.id
+
+
+class RecordingProceduralStore(RecordingStore):
+    def __init__(self, record: ProceduralMemory | None = None, matches=None):
+        super().__init__()
+        self.outcomes = []
+        self.record = record
+        self.matches = matches or []
+
+    def get_by_id(self, record_id):
+        if self.record and self.record.id == record_id:
+            return self.record
+        for record in self.records:
+            if record.id == record_id:
+                return record
+        return None
+
+    def record_outcome(self, record_id, success):
+        self.outcomes.append((record_id, success))
+        record = self.get_by_id(record_id)
+        if record is not None:
+            record.record_outcome(success)
+
+    def get_best_procedure_matches(self, task, top_k=3):
+        return self.matches[:top_k]
 
 
 class FailingStore:
@@ -346,6 +373,119 @@ def test_store_episode_file_cli_cleans_up_owned_media_on_failure():
         os.remove(path)
 
 
+def test_store_procedure_cli_smoke():
+    store = RecordingProceduralStore()
+
+    with patch.object(cli, "_make_bus", return_value=EventBus()):
+        with patch.object(cli, "_make_procedural_store", return_value=store):
+            stdout, _ = run_cli(
+                [
+                    "cli",
+                    "store-procedure",
+                    "Deploy to Lambda",
+                    "--steps",
+                    "Package dependencies",
+                    "Run sam deploy",
+                    "--preconditions",
+                    "AWS CLI configured",
+                ]
+            )
+
+    assert "Stored procedure [" in stdout
+    assert len(store.records) == 1
+    record = store.records[0]
+    assert isinstance(record, ProceduralMemory)
+    assert record.content == "Deploy to Lambda"
+    assert record.steps == ["Package dependencies", "Run sam deploy"]
+    assert record.preconditions == ["AWS CLI configured"]
+    assert record.modality == "text"
+    print("  PASS  CLI stores text-backed procedural memories")
+
+
+def test_store_media_backed_procedure_cli_smoke():
+    store = RecordingProceduralStore()
+    fd, path = tempfile.mkstemp(suffix=".pdf", prefix="cli_procedure_")
+    os.close(fd)
+    with open(path, "wb") as handle:
+        handle.write(b"%PDF-1.4\nrunbook")
+
+    try:
+        with tempfile.TemporaryDirectory(prefix="cli_media_root_") as media_root:
+            with patch.object(cli, "_make_bus", return_value=EventBus()):
+                    with patch.object(cli, "_make_procedural_store", return_value=store):
+                        with patch.object(cli, "_make_media_store", return_value=MediaStore(media_root)):
+                            stdout, _ = run_cli(
+                                [
+                                    "cli",
+                                "store-procedure",
+                                "Review migration checklist",
+                                "--steps",
+                                "Open the checklist",
+                                "Run the migration",
+                                "--file",
+                                path,
+                                "--modality",
+                                "multimodal",
+                                "--media-type",
+                                "pdf",
+                                "--text-description",
+                                    "Reference PDF for the migration sequence",
+                                ]
+                            )
+
+                        assert "Stored procedure [" in stdout
+                        record = store.records[0]
+                        assert record.modality == "multimodal"
+                        assert record.media_type == "pdf"
+                        assert record.media_ref == str(Path(media_root) / "documents" / f"{record.id}.pdf")
+                        assert Path(record.media_ref).read_bytes() == b"%PDF-1.4\nrunbook"
+                        assert record.text_description == "Reference PDF for the migration sequence"
+                        print("  PASS  CLI stores media-backed procedures with owned supporting media")
+    finally:
+        os.remove(path)
+
+
+def test_record_outcome_cli_updates_counts():
+    record = ProceduralMemory(content="Deploy to Lambda", steps=["Package", "Deploy"])
+    store = RecordingProceduralStore(record=record)
+
+    with patch.object(cli, "_make_bus", return_value=EventBus()):
+        with patch.object(cli, "_make_procedural_store", return_value=store):
+            stdout, _ = run_cli(["cli", "record-outcome", record.id, "--failure"])
+
+    assert store.outcomes == [(record.id, False)]
+    assert "failure=1" in stdout
+    print("  PASS  CLI record-outcome updates procedural counters")
+
+
+def test_best_procedure_cli_prints_ranked_matches():
+    record = ProceduralMemory(
+        content="Deploy to Lambda via SAM",
+        steps=["Package dependencies", "Run sam deploy"],
+        success_count=3,
+        failure_count=1,
+    )
+    store = RecordingProceduralStore(
+        matches=[
+            ProceduralMatch(
+                record=record,
+                similarity=0.9,
+                wilson_score=record.wilson_score,
+                combined_score=0.9 * 0.5 + record.wilson_score * 0.5,
+            )
+        ]
+    )
+
+    with patch.object(cli, "_make_bus", return_value=EventBus()):
+        with patch.object(cli, "_make_procedural_store", return_value=store):
+            stdout, _ = run_cli(["cli", "best-procedure", "deploy to Lambda", "-k", "1"])
+
+    assert "Deploy to Lambda via SAM" in stdout
+    assert "similarity=" in stdout
+    assert "wilson=" in stdout
+    print("  PASS  CLI best-procedure prints procedural ranking details")
+
+
 if __name__ == "__main__":
     print("CLI tests:\n")
     test_store_episode_text_cli_smoke()
@@ -355,4 +495,8 @@ if __name__ == "__main__":
     test_query_by_image_cli_embeds_file_and_prints_media_context()
     test_store_episode_multimodal_cli_infers_media_type_from_file()
     test_store_episode_file_cli_cleans_up_owned_media_on_failure()
+    test_store_procedure_cli_smoke()
+    test_store_media_backed_procedure_cli_smoke()
+    test_record_outcome_cli_updates_counts()
+    test_best_procedure_cli_prints_ranked_matches()
     print("\nAll tests passed.")
