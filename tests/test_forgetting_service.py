@@ -365,6 +365,29 @@ def test_procedural_low_performance_forces_fade_or_prune(monkeypatch):
         shutil.rmtree(media_root, ignore_errors=True)
 
 
+def test_zero_outcome_procedure_is_not_marked_low_performance(monkeypatch):
+    untouched = ProceduralMemory(
+        id="proc-untouched",
+        content="Never tried yet",
+        steps=["One"],
+        importance=0.8,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+
+    monkeypatch.setattr("forgetting.service.compute_decay_score", lambda record, now=None: 0.95)
+    service, media_root = _make_service(procedural_records=[untouched])
+
+    try:
+        report = service.run_cycle(dry_run=True)
+        decision = _ids_for(report)["proc-untouched"]
+
+        assert decision.action == "keep"
+        assert decision.reason is None
+        print("  PASS  zero-outcome procedures are not treated as low-performance before they are ever tried")
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+
+
 def test_missing_record_is_tracked_as_skipped_not_pruned(monkeypatch):
     stale = SemanticMemory(
         id="missing-prune",

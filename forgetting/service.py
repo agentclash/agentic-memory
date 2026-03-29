@@ -348,6 +348,8 @@ class ForgettingService:
     def _is_low_performance(self, record: MemoryRecord) -> bool:
         if not isinstance(record, ProceduralMemory):
             return False
+        if record.total_outcomes == 0:
+            return False
         return record.wilson_score < config.PROCEDURAL_LOW_PERF_WILSON_THRESHOLD
 
     def _is_prune_level_low_performance(self, record: MemoryRecord) -> bool:
