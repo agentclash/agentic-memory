@@ -14,9 +14,7 @@ from tests.helpers import HashingEmbedder
 
 
 def _make_chroma_dir(prefix: str) -> str:
-    path = tempfile.mkdtemp(prefix=prefix)
-    shutil.rmtree(path, ignore_errors=True)
-    return path
+    return tempfile.mkdtemp(prefix=prefix)
 
 
 def test_build_runtime_does_not_mutate_global_chroma_path():
@@ -63,3 +61,41 @@ def test_build_runtime_keeps_chroma_paths_isolated():
     finally:
         shutil.rmtree(first_path, ignore_errors=True)
         shutil.rmtree(second_path, ignore_errors=True)
+
+
+def test_build_runtime_uses_custom_embedding_dimensions_for_vector_validation():
+    runtime_path = _make_chroma_dir("runtime_factory_dimensions_")
+
+    try:
+        runtime = build_runtime(
+            chroma_path=runtime_path,
+            embedding_dimensions=8,
+            embedder=HashingEmbedder(dimensions=8),
+        )
+
+        runtime.retriever.query_by_vector([0.0] * 8, top_k=1)
+
+        try:
+            runtime.retriever.query_by_vector([0.0] * 7, top_k=1)
+            raise AssertionError("Expected dimension mismatch")
+        except ValueError as exc:
+            assert "Expected query vector dimension 8" in str(exc)
+    finally:
+        shutil.rmtree(runtime_path, ignore_errors=True)
+
+
+def test_build_runtime_rejects_mismatched_embedder_and_dimension_override():
+    runtime_path = _make_chroma_dir("runtime_factory_dimension_mismatch_")
+
+    try:
+        try:
+            build_runtime(
+                chroma_path=runtime_path,
+                embedding_dimensions=16,
+                embedder=HashingEmbedder(dimensions=8),
+            )
+            raise AssertionError("Expected mismatched dimensions to raise")
+        except ValueError as exc:
+            assert "Provided embedder dimensions do not match embedding_dimensions" in str(exc)
+    finally:
+        shutil.rmtree(runtime_path, ignore_errors=True)

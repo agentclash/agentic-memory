@@ -31,6 +31,7 @@ class ProceduralStore(BaseStore):
 
     def __init__(
         self,
+        *,
         chroma_path: str | None = None,
         event_bus: EventBus | None = None,
         embedder: TextEmbedder | None = None,

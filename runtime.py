@@ -74,6 +74,14 @@ class MemoryRuntime:
     events: EventRecorder
 
 
+def _embedder_dimensions(embedder: TextEmbedder) -> int | None:
+    for attr in ("_dimensions", "dimensions"):
+        value = getattr(embedder, attr, None)
+        if isinstance(value, int):
+            return value
+    return None
+
+
 def build_runtime(
     *,
     chroma_path: str | None = None,
@@ -82,9 +90,28 @@ def build_runtime(
     embedding_dimensions: int | None = None,
     max_events: int = 200,
 ) -> MemoryRuntime:
-    resolved_media_root = Path(media_root) if media_root is not None else Path(config.MEDIA_STORAGE_PATH)
+    resolved_media_root = (
+        Path(media_root) if media_root is not None else Path(config.MEDIA_STORAGE_PATH)
+    )
+    embedder_dimensions = _embedder_dimensions(embedder) if embedder is not None else None
+    if (
+        embedding_dimensions is not None
+        and embedder_dimensions is not None
+        and embedder_dimensions != embedding_dimensions
+    ):
+        raise ValueError(
+            "Provided embedder dimensions do not match embedding_dimensions: "
+            f"embedder={embedder_dimensions} embedding_dimensions={embedding_dimensions}"
+        )
+
     resolved_dimensions = (
-        config.EMBEDDING_DIMENSIONS if embedding_dimensions is None else embedding_dimensions
+        embedding_dimensions
+        if embedding_dimensions is not None
+        else (
+            embedder_dimensions
+            if embedder_dimensions is not None
+            else config.EMBEDDING_DIMENSIONS
+        )
     )
 
     bus = EventBus()
