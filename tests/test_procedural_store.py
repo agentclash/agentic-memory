@@ -227,6 +227,30 @@ def test_record_outcome_rewrites_metadata_without_reembedding():
     print("  PASS  record_outcome rewrites metadata only and preserves embedding/document data")
 
 
+def test_record_outcome_emits_memory_updated_event():
+    bus = EventBus()
+    recorder = EventRecorder(bus, "memory.updated")
+    store, _ = fresh_setup(event_bus=bus)
+    record = ProceduralMemory(
+        content="Deploy to Lambda",
+        steps=["Package", "Deploy"],
+    )
+    store.store(record)
+
+    store.record_outcome(record.id, True)
+
+    assert len(recorder.events) == 1
+    event = recorder.events[0]
+    assert event.data["record_id"] == record.id
+    assert event.data["memory_type"] == "procedural"
+    assert event.data["update_type"] == "procedural_outcome"
+    assert event.data["success"] is True
+    assert event.data["success_count"] == 1
+    assert event.data["failure_count"] == 0
+    assert event.data["total_outcomes"] == 1
+    print("  PASS  record_outcome emits memory.updated with outcome counters")
+
+
 def test_record_outcome_missing_record_is_a_no_op():
     store, _ = fresh_setup()
 
@@ -358,6 +382,7 @@ if __name__ == "__main__":
         test_store_emits_memory_stored_with_procedural_fields()
         test_media_backed_procedure_round_trip_uses_combined_embedding_path()
         test_record_outcome_rewrites_metadata_without_reembedding()
+        test_record_outcome_emits_memory_updated_event()
         test_record_outcome_missing_record_is_a_no_op()
         test_get_all_records_returns_records_without_embeddings_by_default()
         test_procedural_delete_is_idempotent_and_replace_preserves_embedding()

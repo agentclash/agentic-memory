@@ -1,4 +1,4 @@
-"""Edge-case API tests around the shared runtime refactor."""
+"""Edge-case API tests around the runtime hardening path."""
 
 import os
 import sys
@@ -45,10 +45,14 @@ async def test_semantic_write_swallows_valueerror_from_contradiction_lookup():
 
     assert response.status_code == 200
     assert response.json()["potential_contradictions"] == []
+    assert response.json()["contradiction_check"] == {
+        "status": "skipped",
+        "detail": "synthetic contradiction miss",
+    }
 
 
 @pytest.mark.anyio
-async def test_semantic_write_surfaces_programming_error_from_contradiction_lookup():
+async def test_semantic_write_reports_programming_error_from_contradiction_lookup():
     async with make_client() as client:
         await client.get("/api/overview")
         client.app.state.service.contradiction_detector.find_potential_contradictions = (
@@ -60,7 +64,12 @@ async def test_semantic_write_surfaces_programming_error_from_contradiction_look
             json={"content": "TypeError contradiction lookup should not be suppressed"},
         )
 
-    assert response.status_code == 500
+    assert response.status_code == 200
+    assert response.json()["potential_contradictions"] == []
+    assert response.json()["contradiction_check"] == {
+        "status": "error",
+        "detail": "synthetic programming error",
+    }
 
 
 @pytest.mark.anyio

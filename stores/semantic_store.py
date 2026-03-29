@@ -78,21 +78,49 @@ class SemanticStore(BaseStore):
             return None
         return self._from_result(result, 0)
 
-    def get_all_records(self, include_embeddings: bool = False) -> list[SemanticMemory]:
-        return self._all_records(include_embeddings=include_embeddings)
+    def get_all_records(
+        self,
+        include_embeddings: bool = False,
+        *,
+        include_superseded: bool = False,
+    ) -> list[SemanticMemory]:
+        return self._all_records(
+            include_embeddings=include_embeddings,
+            include_superseded=include_superseded,
+        )
 
-    def retrieve(self, query: str, top_k: int = 5) -> list[tuple[SemanticMemory, float]]:
+    def retrieve(
+        self,
+        query: str,
+        top_k: int = 5,
+        *,
+        include_superseded: bool = False,
+    ) -> list[tuple[SemanticMemory, float]]:
         query_embedding = self._embedder.embed_query(query)
-        return self.retrieve_by_vector(query_embedding, top_k=top_k)
+        return self.retrieve_by_vector(
+            query_embedding,
+            top_k=top_k,
+            include_superseded=include_superseded,
+        )
 
     def retrieve_by_vector(
         self,
         vector: list[float],
         top_k: int = 5,
+        *,
+        include_superseded: bool = False,
     ) -> list[tuple[SemanticMemory, float]]:
+        n_results = max(1, top_k)
+        if not include_superseded:
+            # We need enough raw candidates to still return `top_k` active
+            # records after filtering superseded ones, and Chroma cannot apply
+            # that predicate natively for us. This makes default semantic recall
+            # O(N) in collection size, which is acceptable for the current
+            # scale but should be revisited if the store grows substantially.
+            n_results = max(1, self._collection.count())
         result = self._collection.query(
             query_embeddings=[vector],
-            n_results=top_k,
+            n_results=n_results,
             include=["embeddings", "documents", "metadatas", "distances"],
         )
         if not result["ids"] or not result["ids"][0]:
@@ -101,9 +129,13 @@ class SemanticStore(BaseStore):
         pairs = []
         for i in range(len(result["ids"][0])):
             record = self._from_query_result(result, i)
+            if not include_superseded and record.superseded_by:
+                continue
             # ChromaDB cosine distance = 1 - similarity
             similarity = 1.0 - result["distances"][0][i]
             pairs.append((record, similarity))
+            if len(pairs) >= top_k:
+                break
         return pairs
 
     # ── serialisation helpers ──────────────────────────────────────────────
@@ -156,7 +188,12 @@ class SemanticStore(BaseStore):
             "text_description": record.text_description or "",
         }
 
-    def _all_records(self, *, include_embeddings: bool) -> list[SemanticMemory]:
+    def _all_records(
+        self,
+        *,
+        include_embeddings: bool,
+        include_superseded: bool,
+    ) -> list[SemanticMemory]:
         include = ["documents", "metadatas"]
         if include_embeddings:
             include.insert(0, "embeddings")
@@ -164,7 +201,10 @@ class SemanticStore(BaseStore):
         result = self._collection.get(include=include)
         if not result["ids"]:
             return []
-        return [self._from_result(result, index) for index in range(len(result["ids"]))]
+        records = [self._from_result(result, index) for index in range(len(result["ids"]))]
+        if include_superseded:
+            return records
+        return [record for record in records if not record.superseded_by]
 
     def _build_record(self, doc: str, id: str, embedding, meta: dict) -> SemanticMemory:
         last_accessed = meta.get("last_accessed_at", "")

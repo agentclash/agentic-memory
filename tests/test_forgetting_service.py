@@ -42,8 +42,15 @@ class FakeStore(BaseStore):
     def get_by_id(self, record_id):
         return self._records.get(record_id)
 
-    def get_all_records(self, include_embeddings: bool = False):
+    def get_all_records(
+        self,
+        include_embeddings: bool = False,
+        *,
+        include_superseded: bool = False,
+    ):
         records = list(self._records.values())
+        if not include_superseded:
+            records = [record for record in records if not getattr(record, "superseded_by", None)]
         if include_embeddings:
             return records
         return [replace(record, embedding=None) for record in records]
@@ -66,11 +73,34 @@ class FakeStore(BaseStore):
         self._records[record.id] = record
 
 
+class TrackingSemanticStore(FakeStore):
+    def __init__(self, records=None):
+        super().__init__(records)
+        self.last_include_superseded = None
+
+    def get_all_records(
+        self,
+        include_embeddings: bool = False,
+        *,
+        include_superseded: bool = False,
+    ):
+        self.last_include_superseded = include_superseded
+        return super().get_all_records(
+            include_embeddings=include_embeddings,
+            include_superseded=include_superseded,
+        )
+
+
 class EventRecorder:
     def __init__(self, bus: EventBus, *event_types: str):
         self.events = []
         for event_type in event_types:
             bus.subscribe(event_type, self.events.append)
+
+
+class _NoopDuplicateDetector:
+    def find_likely_duplicates_batch(self, threshold=0.95):
+        return []
 
 
 def _media_store():
@@ -93,13 +123,38 @@ def _make_service(
         procedural_store=FakeStore(procedural_records),
         media_store=media_store,
         event_bus=event_bus,
-        contradiction_detector=FakeDuplicateDetector(duplicate_pairs),
+        contradiction_detector=FakeDuplicateDetector(duplicate_pairs) if duplicate_pairs is not None else _NoopDuplicateDetector(),
     )
     return service, media_root
 
 
 def _ids_for(report):
     return {decision.record_id: decision for decision in report.decisions}
+
+
+def test_scan_records_includes_superseded_semantic_rows():
+    superseded = SemanticMemory(
+        id="semantic-old",
+        content="Old fact",
+        superseded_by="semantic-new",
+    )
+    active = SemanticMemory(
+        id="semantic-new",
+        content="New fact",
+    )
+    semantic_store = TrackingSemanticStore([superseded, active])
+    service = ForgettingService(
+        semantic_store=semantic_store,
+        episodic_store=FakeStore(),
+        procedural_store=FakeStore(),
+        media_store=MediaStore(tempfile.mkdtemp(prefix="forgetting_media_scan_")),
+        contradiction_detector=_NoopDuplicateDetector(),
+    )
+
+    records = service._scan_records()
+
+    assert semantic_store.last_include_superseded is True
+    assert {"semantic-old", "semantic-new"} <= set(records)
 
 
 def test_dry_run_resolves_duplicate_clusters_component_wise(monkeypatch):

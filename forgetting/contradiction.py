@@ -98,11 +98,18 @@ class ContradictionDetector:
         pairs: list[tuple[str, str, float]] = []
         seen_pairs: set[tuple[str, str]] = set()
 
-        for record in self._store.get_all_records(include_embeddings=True):
+        for record in self._store.get_all_records(
+            include_embeddings=True,
+            include_superseded=True,
+        ):
             if record.embedding is None:
                 continue
 
-            matches = self._store.retrieve_by_vector(record.embedding, top_k=2)
+            matches = self._store.retrieve_by_vector(
+                record.embedding,
+                top_k=2,
+                include_superseded=True,
+            )
             best_other = next((match for match in matches if match[0].id != record.id), None)
             if best_other is None:
                 continue

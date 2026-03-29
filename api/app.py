@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import asyncio
 import json
+import logging
 import mimetypes
 import os
 import tempfile
 from collections.abc import Mapping
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -32,6 +35,7 @@ DEFAULT_ALLOWED_ORIGINS = [
 DEFAULT_MEDIA_DIR = Path(os.getenv("MEMORY_MEDIA_DIR", config.MEDIA_STORAGE_PATH))
 _SUPPORTED_FILE_MODALITIES = {"audio", "image", "video", "multimodal"}
 _ALLOWED_MEDIA_TYPES = {"image", "audio", "video", "pdf"}
+logger = logging.getLogger(__name__)
 
 
 def _normalise_origins(origins: list[str] | None = None) -> list[str]:
@@ -323,14 +327,27 @@ class MemoryAPIService:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class ContradictionCheckResult:
+    status: str
+    candidates: list[ContradictionCandidate]
+    detail: str | None = None
+
+
 def _safe_contradiction_lookup(
     active_service: MemoryAPIService,
     record: SemanticMemory,
-) -> list[ContradictionCandidate]:
+) -> ContradictionCheckResult:
     try:
-        return active_service.contradiction_detector.find_potential_contradictions(record)
-    except ValueError:
-        return []
+        return ContradictionCheckResult(
+            status="completed",
+            candidates=active_service.contradiction_detector.find_potential_contradictions(record),
+        )
+    except ValueError as exc:
+        return ContradictionCheckResult(status="skipped", candidates=[], detail=str(exc))
+    except Exception as exc:
+        logger.exception("Contradiction lookup failed for semantic record %s", record.id)
+        return ContradictionCheckResult(status="error", candidates=[], detail=str(exc))
 
 
 def _serialise_contradiction_candidate(candidate: ContradictionCandidate) -> dict[str, Any]:
@@ -342,6 +359,7 @@ def _serialise_contradiction_candidate(candidate: ContradictionCandidate) -> dic
 
 def _serialise_forgetting_report(report: ForgettingReport) -> dict[str, Any]:
     return {
+        "status": "completed",
         "dry_run": report.dry_run,
         "scanned": report.scanned,
         "kept": report.kept,
@@ -388,6 +406,7 @@ def create_app(
         allow_headers=["*"],
     )
     app.state.service = None
+    app.state.forgetting_lock = asyncio.Lock()
     app.state.service_config = {
         "chroma_path": chroma_path,
         "media_root": Path(media_root) if media_root else None,
@@ -399,6 +418,21 @@ def create_app(
         if app.state.service is None:
             app.state.service = MemoryAPIService(**app.state.service_config)
         return app.state.service
+
+    async def run_forgetting_cycle(*, dry_run: bool) -> dict[str, Any]:
+        lock = app.state.forgetting_lock
+        # This is intentionally single-flight per app process. Multi-worker
+        # deployments still need an external coordinator if cross-process
+        # forgetting exclusivity becomes a requirement.
+        if lock.locked():
+            return {
+                "status": "already_running",
+                "dry_run": dry_run,
+            }
+
+        async with lock:
+            report = await asyncio.to_thread(service().forgetting_service.run_cycle, dry_run)
+            return _serialise_forgetting_report(report)
 
     @app.get("/health")
     async def health() -> dict[str, str]:
@@ -467,12 +501,21 @@ def create_app(
         except Exception:
             _cleanup_owned_media(active_service, record.media_ref)
             raise
-        candidates = _safe_contradiction_lookup(active_service, record)
+        contradiction_check = _safe_contradiction_lookup(active_service, record)
         return {
             "record": _serialise_record(record),
             "potential_contradictions": [
-                _serialise_contradiction_candidate(c) for c in candidates
+                _serialise_contradiction_candidate(c)
+                for c in contradiction_check.candidates
             ],
+            "contradiction_check": {
+                "status": contradiction_check.status,
+                **(
+                    {"detail": contradiction_check.detail}
+                    if contradiction_check.detail is not None
+                    else {}
+                ),
+            },
         }
 
     @app.post("/api/memories/episodic/text")
@@ -793,13 +836,11 @@ def create_app(
 
     @app.post("/api/forgetting/preview")
     async def forgetting_preview() -> dict[str, Any]:
-        report = service().forgetting_service.run_cycle(dry_run=True)
-        return _serialise_forgetting_report(report)
+        return await run_forgetting_cycle(dry_run=True)
 
     @app.post("/api/forgetting/run")
     async def forgetting_run() -> dict[str, Any]:
-        report = service().forgetting_service.run_cycle(dry_run=False)
-        return _serialise_forgetting_report(report)
+        return await run_forgetting_cycle(dry_run=False)
 
     @app.post("/api/forgetting/resolve")
     async def forgetting_resolve(payload: dict[str, Any]) -> dict[str, Any]:
