@@ -13,11 +13,11 @@ from events import ConsoleLogger, EventBus
 from models.episodic import EpisodicMemory
 from models.procedural import ProceduralMemory
 from models.semantic import SemanticMemory
+from retrieval.retriever import UnifiedRetriever
 from stores.episodic_store import EpisodicStore
 from stores.media_store import MediaStore
 from stores.procedural_store import ProceduralStore
 from stores.semantic_store import SemanticStore
-from retrieval.retriever import UnifiedRetriever
 from utils.embeddings import GeminiEmbedder, TextEmbedder
 import config
 
@@ -27,6 +27,14 @@ _DEFAULT_MIME_TYPES = {
     "video": "video/mp4",
     "pdf": "application/pdf",
 }
+
+
+def _make_media_store() -> MediaStore:
+    return MediaStore(config.MEDIA_STORAGE_PATH)
+
+
+def _make_embedder() -> TextEmbedder:
+    return GeminiEmbedder()
 
 
 def _make_bus() -> EventBus:
@@ -47,15 +55,9 @@ def _make_procedural_store(event_bus: EventBus | None = None) -> ProceduralStore
     return ProceduralStore(event_bus=event_bus, media_store=_make_media_store())
 
 
-def _make_media_store() -> MediaStore:
-    return MediaStore(config.MEDIA_STORAGE_PATH)
-
-
-def _make_embedder() -> TextEmbedder:
-    return GeminiEmbedder()
-
-
 def _make_retriever(event_bus: EventBus | None = None) -> UnifiedRetriever:
+    # The demo CLI keeps direct wiring so tests can patch the individual factory
+    # helpers without constructing the full shared runtime container.
     return UnifiedRetriever(
         stores={
             "semantic": _make_semantic_store(event_bus=event_bus),

@@ -17,12 +17,14 @@ class SemanticStore(BaseStore):
 
     def __init__(
         self,
+        *,
+        chroma_path: str | None = None,
         event_bus: EventBus | None = None,
         embedder: TextEmbedder | None = None,
         media_store: MediaStore | None = None,
     ):
         super().__init__(event_bus=event_bus)
-        client = chromadb.PersistentClient(path=config.CHROMA_DB_PATH)
+        client = chromadb.PersistentClient(path=chroma_path or config.CHROMA_DB_PATH)
         self._collection = client.get_or_create_collection(
             name="semantic_memories",
             metadata={"hnsw:space": "cosine"},

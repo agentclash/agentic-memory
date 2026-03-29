@@ -9,7 +9,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Protocol
 
-from config import EMBEDDING_DIMENSIONS, EMBEDDING_MODEL, GEMINI_API_KEY
+import config
+from config import EMBEDDING_MODEL, GEMINI_API_KEY
 from utils.retry import retry_with_exponential_backoff
 
 _IMAGE_MIME_TYPES = {
@@ -67,6 +68,9 @@ _SUPPORTED_MIME_TYPES = {
 
 
 class TextEmbedder(Protocol):
+    @property
+    def dimensions(self) -> int | None: ...
+
     def embed_text(self, text: str) -> list[float]: ...
 
     def embed_query(self, text: str) -> list[float]: ...
@@ -79,16 +83,21 @@ class EmbeddingProviderError(RuntimeError):
 class GeminiEmbedder:
     """Converts text and local media into Gemini embedding vectors."""
 
-    def __init__(self):
+    def __init__(self, *, dimensions: int | None = None):
         self._genai = None
         self._client = None
         self._types = None
         self._errors = None
         self._doc_config = None
         self._query_config = None
+        self._dimensions = config.EMBEDDING_DIMENSIONS if dimensions is None else dimensions
 
     def embed_text(self, text: str) -> list[float]:
         return self._embed([text], self._document_config())[0]
+
+    @property
+    def dimensions(self) -> int | None:
+        return self._dimensions
 
     def embed_query(self, text: str) -> list[float]:
         return self._embed([text], self._query_config_obj())[0]
@@ -294,9 +303,9 @@ class GeminiEmbedder:
             raise
 
     def _normalize_vector(self, vector: list[float]) -> list[float]:
-        if len(vector) != EMBEDDING_DIMENSIONS:
+        if len(vector) != self._dimensions:
             raise ValueError(
-                f"Expected embedding dimension {EMBEDDING_DIMENSIONS}, got {len(vector)}"
+                f"Expected embedding dimension {self._dimensions}, got {len(vector)}"
             )
         norm = math.sqrt(sum(value * value for value in vector))
         if norm == 0:
@@ -463,7 +472,7 @@ class GeminiEmbedder:
         if self._doc_config is None:
             _, types, _ = self._load_sdk()
             self._doc_config = types.EmbedContentConfig(
-                output_dimensionality=EMBEDDING_DIMENSIONS,
+                output_dimensionality=self._dimensions,
                 task_type="RETRIEVAL_DOCUMENT",
             )
         return self._doc_config
@@ -472,7 +481,7 @@ class GeminiEmbedder:
         if self._query_config is None:
             _, types, _ = self._load_sdk()
             self._query_config = types.EmbedContentConfig(
-                output_dimensionality=EMBEDDING_DIMENSIONS,
+                output_dimensionality=self._dimensions,
                 task_type="RETRIEVAL_QUERY",
             )
         return self._query_config
