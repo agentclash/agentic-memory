@@ -16,6 +16,13 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 import config
+from mcp_server.schemas import (
+    serialise_contradiction_candidate as _mcp_serialise_contradiction_candidate,
+    serialise_forgetting_report as _mcp_serialise_forgetting_report,
+    serialise_procedural_match as _mcp_serialise_procedural_match,
+    serialise_ranked_result as _mcp_serialise_ranked_result,
+    serialise_record as _mcp_serialise_record,
+)
 from models.base import MemoryRecord, normalize_modality
 from models.episodic import EpisodicMemory
 from models.procedural import ProceduralMemory
@@ -197,75 +204,15 @@ def _cleanup_owned_media(service: MemoryAPIService, media_ref: str | None) -> No
 
 
 def _serialise_record(record: MemoryRecord) -> dict[str, Any]:
-    payload = {
-        "id": record.id,
-        "memory_type": record.memory_type,
-        "modality": record.modality,
-        "content": record.content,
-        "created_at": record.created_at.isoformat(),
-        "last_accessed_at": record.last_accessed_at.isoformat() if record.last_accessed_at else None,
-        "access_count": record.access_count,
-        "importance": record.importance,
-        "media_ref": record.media_ref,
-        "media_type": record.media_type,
-        "text_description": record.text_description,
-        "has_media": record.has_media,
-    }
-    if isinstance(record, SemanticMemory):
-        payload.update(
-            {
-                "category": record.category,
-                "domain": record.domain,
-                "confidence": record.confidence,
-                "supersedes": record.supersedes,
-                "related_ids": record.related_ids,
-                "has_visual": record.has_visual,
-            }
-        )
-    if isinstance(record, EpisodicMemory):
-        payload.update(
-            {
-                "session_id": record.session_id,
-                "turn_number": record.turn_number,
-                "participants": record.participants,
-                "summary": record.summary,
-                "emotional_valence": record.emotional_valence,
-                "emotional_profile": record.emotional_profile,
-                "source_mime_type": record.source_mime_type,
-            }
-        )
-    if isinstance(record, ProceduralMemory):
-        payload.update(
-            {
-                "steps": record.steps,
-                "preconditions": record.preconditions,
-                "success_count": record.success_count,
-                "failure_count": record.failure_count,
-                "total_outcomes": record.total_outcomes,
-                "success_rate": record.success_rate,
-                "wilson_score": record.wilson_score,
-            }
-        )
-    return payload
+    return _mcp_serialise_record(record).model_dump(mode="json")
 
 
 def _serialise_ranked_result(result) -> dict[str, Any]:
-    return {
-        "record": _serialise_record(result.record),
-        "raw_similarity": result.raw_similarity,
-        "recency_score": result.recency_score,
-        "importance_score": result.importance_score,
-        "final_score": result.final_score,
-    }
+    return _mcp_serialise_ranked_result(result).model_dump(mode="json")
 
 
 def _serialise_procedural_match(match: ProceduralMatch) -> dict[str, Any]:
-    return {
-        "record": _serialise_record(match.record),
-        "similarity": match.similarity,
-        "wilson_score": match.wilson_score,
-        "combined_score": match.combined_score,
-    }
+    return _mcp_serialise_procedural_match(match).model_dump(mode="json")
 
 
 class MemoryAPIService:
@@ -351,42 +298,11 @@ def _safe_contradiction_lookup(
 
 
 def _serialise_contradiction_candidate(candidate: ContradictionCandidate) -> dict[str, Any]:
-    return {
-        "record": _serialise_record(candidate.record),
-        "similarity": candidate.similarity,
-    }
+    return _mcp_serialise_contradiction_candidate(candidate).model_dump(mode="json")
 
 
 def _serialise_forgetting_report(report: ForgettingReport) -> dict[str, Any]:
-    return {
-        "status": "completed",
-        "dry_run": report.dry_run,
-        "scanned": report.scanned,
-        "kept": report.kept,
-        "faded": report.faded,
-        "pruned": report.pruned,
-        "media_deleted": report.media_deleted,
-        "duplicates_flagged": report.duplicates_flagged,
-        "skipped_records": report.skipped_records,
-        "skipped_media": report.skipped_media,
-        "by_type": dict(report.by_type),
-        "decisions": [
-            {
-                "record_id": d.record_id,
-                "memory_type": d.memory_type,
-                "action": d.action,
-                "reason": d.reason,
-                "score": d.score,
-                "media_deleted": d.media_deleted,
-                "executed": d.executed,
-                "record_skip_reason": d.record_skip_reason,
-                "media_skip_reason": d.media_skip_reason,
-                "old_importance": d.old_importance,
-                "new_importance": d.new_importance,
-            }
-            for d in report.decisions
-        ],
-    }
+    return _mcp_serialise_forgetting_report(report).model_dump(mode="json")
 
 
 def create_app(
