@@ -27,9 +27,11 @@ def test_build_runtime_does_not_mutate_global_chroma_path():
             embedder=HashingEmbedder(dimensions=config.EMBEDDING_DIMENSIONS),
         )
         runtime.semantic_store.store(SemanticMemory(content="Runtime-scoped fact"))
+        records = runtime.semantic_store.get_all_records()
 
         assert config.CHROMA_DB_PATH == original_path
-        assert runtime.semantic_store.get_by_id(runtime.semantic_store.get_all_records()[0].id) is not None
+        assert len(records) == 1
+        assert runtime.semantic_store.get_by_id(records[0].id) is not None
     finally:
         shutil.rmtree(runtime_path, ignore_errors=True)
 

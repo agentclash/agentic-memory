@@ -12,6 +12,10 @@ class HashingEmbedder:
     def __init__(self, dimensions: int = 64):
         self._dimensions = dimensions
 
+    @property
+    def dimensions(self) -> int | None:
+        return self._dimensions
+
     def embed_text(self, text: str) -> list[float]:
         return self._embed(text)
 

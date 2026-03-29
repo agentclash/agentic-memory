@@ -75,11 +75,7 @@ class MemoryRuntime:
 
 
 def _embedder_dimensions(embedder: TextEmbedder) -> int | None:
-    for attr in ("_dimensions", "dimensions"):
-        value = getattr(embedder, attr, None)
-        if isinstance(value, int):
-            return value
-    return None
+    return embedder.dimensions
 
 
 def build_runtime(

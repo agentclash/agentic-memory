@@ -56,6 +56,8 @@ def _make_procedural_store(event_bus: EventBus | None = None) -> ProceduralStore
 
 
 def _make_retriever(event_bus: EventBus | None = None) -> UnifiedRetriever:
+    # The demo CLI keeps direct wiring so tests can patch the individual factory
+    # helpers without constructing the full shared runtime container.
     return UnifiedRetriever(
         stores={
             "semantic": _make_semantic_store(event_bus=event_bus),

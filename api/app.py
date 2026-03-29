@@ -329,7 +329,7 @@ def _safe_contradiction_lookup(
 ) -> list[ContradictionCandidate]:
     try:
         return active_service.contradiction_detector.find_potential_contradictions(record)
-    except (ValueError, Exception):
+    except ValueError:
         return []
 
 

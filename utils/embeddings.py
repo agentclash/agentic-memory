@@ -68,6 +68,9 @@ _SUPPORTED_MIME_TYPES = {
 
 
 class TextEmbedder(Protocol):
+    @property
+    def dimensions(self) -> int | None: ...
+
     def embed_text(self, text: str) -> list[float]: ...
 
     def embed_query(self, text: str) -> list[float]: ...
@@ -91,6 +94,10 @@ class GeminiEmbedder:
 
     def embed_text(self, text: str) -> list[float]:
         return self._embed([text], self._document_config())[0]
+
+    @property
+    def dimensions(self) -> int | None:
+        return self._dimensions
 
     def embed_query(self, text: str) -> list[float]:
         return self._embed([text], self._query_config_obj())[0]
