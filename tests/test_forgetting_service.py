@@ -374,14 +374,7 @@ def test_missing_record_is_tracked_as_skipped_not_pruned(monkeypatch):
     )
     monkeypatch.setattr("forgetting.service.compute_decay_score", lambda record, now=None: 0.01)
     service, media_root = _make_service(semantic_records=[stale])
-
-    original_delete = service._stores["semantic"].delete
-
-    def delete_then_lose(record_id):
-        service._stores["semantic"]._records.pop(record_id, None)
-        original_delete(record_id)
-
-    service._stores["semantic"].get_by_id = lambda record_id: None if record_id == "missing-prune" else None  # type: ignore[method-assign]
+    service._stores["semantic"].get_by_id = lambda record_id: None  # type: ignore[method-assign]
 
     try:
         report = service.run_cycle(dry_run=False)
@@ -392,6 +385,30 @@ def test_missing_record_is_tracked_as_skipped_not_pruned(monkeypatch):
         assert report.pruned == 0
         assert report.skipped_records == 1
         print("  PASS  records missing at delete time are reported as skipped instead of successful prunes")
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+
+
+def test_missing_record_is_tracked_as_skipped_for_fades_too(monkeypatch):
+    record = SemanticMemory(
+        id="missing-fade",
+        content="Will vanish before fade",
+        importance=0.8,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr("forgetting.service.compute_decay_score", lambda record, now=None: 0.15)
+    service, media_root = _make_service(semantic_records=[record])
+    service._stores["semantic"].get_by_id = lambda record_id: None  # type: ignore[method-assign]
+
+    try:
+        report = service.run_cycle(dry_run=False)
+        decision = _ids_for(report)["missing-fade"]
+
+        assert decision.executed is False
+        assert decision.record_skip_reason == "missing_record"
+        assert report.faded == 0
+        assert report.skipped_records == 1
+        print("  PASS  records missing at fade time are reported as skipped instead of being reinserted")
     finally:
         shutil.rmtree(media_root, ignore_errors=True)
 

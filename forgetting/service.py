@@ -383,9 +383,14 @@ class ForgettingService:
             if item.action != _ACTION_FADE:
                 continue
             decision = by_id[item.record.id]
-            updated = item.record
-            updated.importance = decision.new_importance if decision.new_importance is not None else 0.0
-            self._stores[item.record.memory_type].replace(updated)
+            store = self._stores[item.record.memory_type]
+            current = store.get_by_id(item.record.id)
+            if current is None:
+                decision.record_skip_reason = "missing_record"
+                continue
+
+            current.importance = decision.new_importance if decision.new_importance is not None else 0.0
+            store.replace(current)
             decision.executed = True
             self._emit_event(
                 "memory.faded",
