@@ -87,6 +87,9 @@ class ProceduralStore(BaseStore):
             return None
         return self._from_result(result, 0)
 
+    def get_all_records(self, include_embeddings: bool = False) -> list[ProceduralMemory]:
+        return self._all_records(include_embeddings=include_embeddings)
+
     def retrieve(self, query: str, top_k: int = 5) -> list[tuple[ProceduralMemory, float]]:
         query_embedding = self._embedder.embed_query(query)
         return self.retrieve_by_vector(query_embedding, top_k=top_k)
@@ -121,12 +124,25 @@ class ProceduralStore(BaseStore):
         meta["last_accessed_at"] = now.isoformat()
         self._collection.update(ids=[record_id], metadatas=[meta])
 
+    def delete(self, record_id: str) -> None:
+        self._collection.delete(ids=[record_id])
+
+    def replace(self, record: ProceduralMemory) -> None:
+        if record.embedding is None:
+            raise ValueError("replace(record) requires record.embedding to be set")
+        self._collection.update(
+            ids=[record.id],
+            embeddings=[record.embedding],
+            documents=[record.content],
+            metadatas=[self._to_metadata(record)],
+        )
+
     def record_outcome(self, record_id: str, success: bool) -> None:
         record = self.get_by_id(record_id)
         if record is None:
             return
         record.record_outcome(success)
-        self._collection.update(ids=[record_id], metadatas=[self._to_metadata(record)])
+        self.replace(record)
 
     def get_best_procedures(
         self,
@@ -185,6 +201,16 @@ class ProceduralStore(BaseStore):
             "success_count": record.success_count,
             "failure_count": record.failure_count,
         }
+
+    def _all_records(self, *, include_embeddings: bool) -> list[ProceduralMemory]:
+        include = ["documents", "metadatas"]
+        if include_embeddings:
+            include.insert(0, "embeddings")
+
+        result = self._collection.get(include=include)
+        if not result["ids"]:
+            return []
+        return [self._from_result(result, index) for index in range(len(result["ids"]))]
 
     def _build_record(self, doc: str, record_id: str, embedding, meta: dict) -> ProceduralMemory:
         last_accessed = meta.get("last_accessed_at", "")
@@ -270,10 +296,11 @@ class ProceduralStore(BaseStore):
         return defaults.get(media_type)
 
     def _from_result(self, result: dict, index: int) -> ProceduralMemory:
+        embeddings = result.get("embeddings")
         return self._build_record(
             result["documents"][index],
             result["ids"][index],
-            result["embeddings"][index],
+            embeddings[index] if embeddings is not None else None,
             result["metadatas"][index],
         )
 

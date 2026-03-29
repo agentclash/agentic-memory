@@ -26,6 +26,11 @@ class BaseStore(ABC):
         ...
 
     @abstractmethod
+    def get_all_records(self, include_embeddings: bool = False) -> list[MemoryRecord]:
+        """Return every persisted record in the store."""
+        ...
+
+    @abstractmethod
     def retrieve(self, query: str, top_k: int = 5) -> list[tuple[MemoryRecord, float]]:
         """Semantic search. Returns (record, similarity_score) pairs, highest first."""
         ...
@@ -42,4 +47,14 @@ class BaseStore(ABC):
     @abstractmethod
     def update_access(self, record_id: str) -> None:
         """Bump access_count and last_accessed_at for a retrieved record."""
+        ...
+
+    @abstractmethod
+    def delete(self, record_id: str) -> None:
+        """Delete a record by id. Missing ids are ignored."""
+        ...
+
+    @abstractmethod
+    def replace(self, record: MemoryRecord) -> None:
+        """Replace a stored record without implicitly re-embedding it."""
         ...
