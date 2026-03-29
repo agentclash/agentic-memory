@@ -45,6 +45,9 @@ async def test_semantic_write_swallows_valueerror_from_contradiction_lookup():
 
     assert response.status_code == 200
     assert response.json()["potential_contradictions"] == []
+    assert response.json()["total_contradictions"] == 0
+    assert response.json()["contradictions_truncated"] is False
+    assert response.json()["contradiction_check_order"] == "after_store"
     assert response.json()["contradiction_check"] == {
         "status": "skipped",
         "detail": "synthetic contradiction miss",
@@ -66,6 +69,9 @@ async def test_semantic_write_reports_programming_error_from_contradiction_looku
 
     assert response.status_code == 200
     assert response.json()["potential_contradictions"] == []
+    assert response.json()["total_contradictions"] == 0
+    assert response.json()["contradictions_truncated"] is False
+    assert response.json()["contradiction_check_order"] == "after_store"
     assert response.json()["contradiction_check"] == {
         "status": "error",
         "detail": "synthetic programming error",

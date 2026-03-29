@@ -8,20 +8,30 @@ export type MemoryRecord = {
   access_count: number;
   importance: number;
   media_ref: string | null;
-  session_id?: string;
+  media_type: string | null;
+  text_description: string | null;
+  has_media: boolean;
+  category?: string | null;
+  domain?: string | null;
+  confidence?: number | null;
+  supersedes?: string | null;
+  superseded_by?: string | null;
+  related_ids?: string[] | null;
+  has_visual?: boolean | null;
+  session_id?: string | null;
   turn_number?: number | null;
-  participants?: string[];
+  participants?: string[] | null;
   summary?: string | null;
+  emotional_valence?: number | null;
+  emotional_profile?: Record<string, number> | null;
   source_mime_type?: string | null;
-  category?: string;
-  confidence?: number;
-  steps?: string[];
-  preconditions?: string[];
-  success_count?: number;
-  failure_count?: number;
-  total_outcomes?: number;
-  success_rate?: number;
-  wilson_score?: number;
+  steps?: string[] | null;
+  preconditions?: string[] | null;
+  success_count?: number | null;
+  failure_count?: number | null;
+  total_outcomes?: number | null;
+  success_rate?: number | null;
+  wilson_score?: number | null;
 };
 
 export type RankedQueryResult = {
@@ -58,6 +68,20 @@ export type ContradictionCandidate = {
   similarity: number;
 };
 
+export type ContradictionCheck = {
+  status: "completed" | "skipped" | "error";
+  detail?: string | null;
+};
+
+export type RememberFactResponse = {
+  record: MemoryRecord;
+  potential_contradictions: ContradictionCandidate[];
+  contradiction_check: ContradictionCheck;
+  contradiction_check_order: "after_store";
+  total_contradictions: number;
+  contradictions_truncated: boolean;
+};
+
 export type ForgettingDecision = {
   record_id: string;
   memory_type: string;
@@ -73,17 +97,21 @@ export type ForgettingDecision = {
 };
 
 export type ForgettingReport = {
+  status: "completed" | "already_running";
   dry_run: boolean;
-  scanned: number;
-  kept: number;
-  faded: number;
-  pruned: number;
-  media_deleted: number;
-  duplicates_flagged: number;
-  skipped_records: number;
-  skipped_media: number;
-  by_type: Record<string, Record<string, number>>;
+  scanned?: number;
+  kept?: number;
+  faded?: number;
+  pruned?: number;
+  media_deleted?: number;
+  duplicates_flagged?: number;
+  skipped_records?: number;
+  skipped_media?: number;
+  by_type?: Record<string, Record<string, number>>;
   decisions: ForgettingDecision[];
+  displayed_decisions: number;
+  total_decisions: number;
+  decisions_truncated: boolean;
 };
 
 const API_BASE = process.env.NEXT_PUBLIC_MEMORY_API_BASE_URL ?? "http://localhost:8000";
@@ -123,13 +151,10 @@ export function createSemanticMemory(input: {
   category?: string;
   confidence?: number;
 }) {
-  return request<{ record: MemoryRecord; potential_contradictions: ContradictionCandidate[] }>(
-    "/api/memories/semantic",
-    {
-      method: "POST",
-      body: JSON.stringify(input),
-    },
-  );
+  return request<RememberFactResponse>("/api/memories/semantic", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
 }
 
 export function createTextEpisode(input: {

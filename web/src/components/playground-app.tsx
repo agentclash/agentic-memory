@@ -1513,16 +1513,16 @@ export function PlaygroundApp() {
                   </p>
                   <div className="space-y-1 rounded-lg border border-[var(--border)] bg-[var(--bg-alt)] p-3 text-xs">
                     <p className="text-[var(--text-2)]">
-                      Scanned {forgettingReport.scanned} &middot; Kept {forgettingReport.kept} &middot;
-                      Faded {forgettingReport.faded} &middot; Pruned {forgettingReport.pruned}
+                      Scanned {forgettingReport.scanned ?? 0} &middot; Kept {forgettingReport.kept ?? 0} &middot;
+                      Faded {forgettingReport.faded ?? 0} &middot; Pruned {forgettingReport.pruned ?? 0}
                     </p>
-                    {forgettingReport.duplicates_flagged > 0 && (
+                    {(forgettingReport.duplicates_flagged ?? 0) > 0 && (
                       <p className="text-amber-300">
-                        {forgettingReport.duplicates_flagged} duplicate{forgettingReport.duplicates_flagged > 1 ? "s" : ""}
+                        {forgettingReport.duplicates_flagged ?? 0} duplicate{(forgettingReport.duplicates_flagged ?? 0) > 1 ? "s" : ""}
                       </p>
                     )}
-                    {forgettingReport.media_deleted > 0 && (
-                      <p className="text-[var(--text-3)]">{forgettingReport.media_deleted} media files deleted</p>
+                    {(forgettingReport.media_deleted ?? 0) > 0 && (
+                      <p className="text-[var(--text-3)]">{forgettingReport.media_deleted ?? 0} media files deleted</p>
                     )}
                     {forgettingReport.decisions
                       .filter((d) => d.action !== "keep")

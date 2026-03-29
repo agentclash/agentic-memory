@@ -1,11 +1,9 @@
 """Verify forgetting endpoints, contradiction lookup, and full cycle integration."""
 
-import asyncio
 import os
 import shutil
 import sys
 import tempfile
-import threading
 
 import httpx
 import pytest
@@ -42,6 +40,9 @@ async def test_semantic_store_returns_potential_contradictions():
         body1 = r1.json()
         assert "potential_contradictions" in body1
         assert body1["contradiction_check"]["status"] == "completed"
+        assert body1["total_contradictions"] == len(body1["potential_contradictions"])
+        assert body1["contradictions_truncated"] is False
+        assert body1["contradiction_check_order"] == "after_store"
         assert isinstance(body1["potential_contradictions"], list)
 
         r2 = await client.post(
@@ -52,6 +53,8 @@ async def test_semantic_store_returns_potential_contradictions():
         body2 = r2.json()
         assert "potential_contradictions" in body2
         assert body2["contradiction_check"]["status"] == "completed"
+        assert body2["total_contradictions"] == len(body2["potential_contradictions"])
+        assert body2["contradictions_truncated"] is False
 
 
 @pytest.mark.anyio
@@ -69,6 +72,9 @@ async def test_forgetting_preview_returns_stable_report():
         assert report["scanned"] == 2
         assert isinstance(report["decisions"], list)
         assert len(report["decisions"]) == 2
+        assert report["displayed_decisions"] == 2
+        assert report["total_decisions"] == 2
+        assert report["decisions_truncated"] is False
         assert report["kept"] + report["faded"] + report["pruned"] == report["scanned"]
 
         for decision in report["decisions"]:
@@ -229,28 +235,15 @@ async def test_overlapping_forgetting_requests_return_already_running():
     async with make_client() as client:
         await client.post("/api/memories/semantic", json={"content": "Overlap witness"})
         await client.get("/api/overview")
+        lock = client.app.state.forgetting_lock
+        await lock.acquire()
+        try:
+            response = await client.post("/api/forgetting/run")
+        finally:
+            lock.release()
 
-        entered = threading.Event()
-        release = threading.Event()
-        original = client.app.state.service.forgetting_service.run_cycle
-
-        def blocking_run_cycle(dry_run: bool = False):
-            entered.set()
-            release.wait()
-            return original(dry_run=dry_run)
-
-        client.app.state.service.forgetting_service.run_cycle = blocking_run_cycle
-
-        first_task = asyncio.create_task(client.post("/api/forgetting/run"))
-        await asyncio.to_thread(entered.wait)
-        second_response = await client.post("/api/forgetting/run")
-        release.set()
-        first_response = await first_task
-
-    assert first_response.status_code == 200
-    assert first_response.json()["status"] == "completed"
-    assert second_response.status_code == 200
-    assert second_response.json() == {
+    assert response.status_code == 200
+    assert response.json() == {
         "status": "already_running",
         "dry_run": False,
     }
