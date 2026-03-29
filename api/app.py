@@ -17,11 +17,13 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import config
 from mcp_server.schemas import (
+    ForgettingReportModel,
     serialise_contradiction_candidate as _mcp_serialise_contradiction_candidate,
     serialise_forgetting_report as _mcp_serialise_forgetting_report,
     serialise_procedural_match as _mcp_serialise_procedural_match,
     serialise_ranked_result as _mcp_serialise_ranked_result,
     serialise_record as _mcp_serialise_record,
+    serialise_remember_fact_response as _mcp_serialise_remember_fact_response,
 )
 from models.base import MemoryRecord, normalize_modality
 from models.episodic import EpisodicMemory
@@ -341,10 +343,10 @@ def create_app(
         # deployments still need an external coordinator if cross-process
         # forgetting exclusivity becomes a requirement.
         if lock.locked():
-            return {
-                "status": "already_running",
-                "dry_run": dry_run,
-            }
+            return ForgettingReportModel(
+                status="already_running",
+                dry_run=dry_run,
+            ).model_dump(mode="json", exclude_none=True)
 
         async with lock:
             report = await asyncio.to_thread(service().forgetting_service.run_cycle, dry_run)
@@ -418,21 +420,12 @@ def create_app(
             _cleanup_owned_media(active_service, record.media_ref)
             raise
         contradiction_check = _safe_contradiction_lookup(active_service, record)
-        return {
-            "record": _serialise_record(record),
-            "potential_contradictions": [
-                _serialise_contradiction_candidate(c)
-                for c in contradiction_check.candidates
-            ],
-            "contradiction_check": {
-                "status": contradiction_check.status,
-                **(
-                    {"detail": contradiction_check.detail}
-                    if contradiction_check.detail is not None
-                    else {}
-                ),
-            },
-        }
+        return _mcp_serialise_remember_fact_response(
+            record=record,
+            contradiction_status=contradiction_check.status,
+            contradiction_candidates=contradiction_check.candidates,
+            contradiction_detail=contradiction_check.detail,
+        ).model_dump(mode="json", exclude_none=True)
 
     @app.post("/api/memories/episodic/text")
     async def create_text_episode(payload: dict[str, Any]) -> dict[str, Any]:

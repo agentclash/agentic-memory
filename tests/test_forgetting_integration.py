@@ -42,6 +42,9 @@ async def test_semantic_store_returns_potential_contradictions():
         body1 = r1.json()
         assert "potential_contradictions" in body1
         assert body1["contradiction_check"]["status"] == "completed"
+        assert body1["total_contradictions"] == len(body1["potential_contradictions"])
+        assert body1["contradictions_truncated"] is False
+        assert body1["contradiction_check_order"] == "after_store"
         assert isinstance(body1["potential_contradictions"], list)
 
         r2 = await client.post(
@@ -52,6 +55,8 @@ async def test_semantic_store_returns_potential_contradictions():
         body2 = r2.json()
         assert "potential_contradictions" in body2
         assert body2["contradiction_check"]["status"] == "completed"
+        assert body2["total_contradictions"] == len(body2["potential_contradictions"])
+        assert body2["contradictions_truncated"] is False
 
 
 @pytest.mark.anyio
@@ -69,6 +74,9 @@ async def test_forgetting_preview_returns_stable_report():
         assert report["scanned"] == 2
         assert isinstance(report["decisions"], list)
         assert len(report["decisions"]) == 2
+        assert report["displayed_decisions"] == 2
+        assert report["total_decisions"] == 2
+        assert report["decisions_truncated"] is False
         assert report["kept"] + report["faded"] + report["pruned"] == report["scanned"]
 
         for decision in report["decisions"]:

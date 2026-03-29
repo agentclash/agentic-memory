@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, model_validator
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 from forgetting.contradiction import ContradictionCandidate
 from forgetting.service import ForgettingReport
@@ -11,6 +11,8 @@ from models.base import MemoryRecord
 from models.episodic import EpisodicMemory
 from models.procedural import ProceduralMemory
 from models.semantic import SemanticMemory
+from retrieval.ranking import RankedResult
+from runtime import MemoryRuntime
 from stores.procedural_store import ProceduralMatch
 
 MemoryType = Literal["semantic", "episodic", "procedural"]
@@ -180,6 +182,14 @@ class RememberProcedureRequest(MCPModel):
     media: MediaInputModel | None = None
     media_type: Literal["image", "audio", "video", "pdf"] | None = None
     text_description: str | None = None
+
+    @field_validator("steps", "preconditions")
+    @classmethod
+    def validate_string_lists(cls, values: list[str]) -> list[str]:
+        for value in values:
+            if not isinstance(value, str) or not value.strip():
+                raise ValueError("steps and preconditions must contain only non-blank strings")
+        return values
 
 
 class RememberFactResponse(MCPModel):
@@ -380,7 +390,7 @@ def serialise_record(record: MemoryRecord) -> MemoryRecordModel:
     return MemoryRecordModel.model_validate(payload)
 
 
-def serialise_ranked_result(result: Any) -> RankedMemoryResultModel:
+def serialise_ranked_result(result: RankedResult) -> RankedMemoryResultModel:
     return RankedMemoryResultModel(
         record=serialise_record(result.record),
         raw_similarity=result.raw_similarity,
@@ -477,7 +487,7 @@ def serialise_memory_overview(payload: dict[str, Any]) -> MemoryOverviewModel:
     return MemoryOverviewModel.model_validate(payload)
 
 
-def get_memory_by_type(service: Any, request: GetMemoryRequest) -> MemoryRecord | None:
+def get_memory_by_type(service: MemoryRuntime, request: GetMemoryRequest) -> MemoryRecord | None:
     store = {
         "semantic": service.semantic_store,
         "episodic": service.episodic_store,

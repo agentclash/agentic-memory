@@ -10,12 +10,14 @@ from forgetting.service import ForgettingDecision, ForgettingReport
 from mcp_server.schemas import (
     DEFAULT_MAX_CONTRADICTIONS,
     DEFAULT_MAX_DECISIONS,
+    ForgettingReportModel,
     GetMemoryRequest,
     InlineContentModel,
     MCPToolError,
     MediaInputModel,
     RecallEpisodesRequestAdapter,
     RememberFactRequest,
+    RememberProcedureRequest,
     serialise_forgetting_report,
     serialise_procedural_match,
     serialise_remember_fact_response,
@@ -91,6 +93,11 @@ def test_remember_fact_request_bounds_contradiction_count():
         RememberFactRequest(content="Embedding size is 768", max_contradictions=999)
 
 
+def test_remember_procedure_request_rejects_blank_steps():
+    with pytest.raises(ValidationError):
+        RememberProcedureRequest(content="Deploy the app", steps=[""])
+
+
 def test_serialise_remember_fact_response_reports_truncation():
     record = SemanticMemory(content="Embedding size is 768")
     candidates = [
@@ -110,6 +117,9 @@ def test_serialise_remember_fact_response_reports_truncation():
     assert payload.total_contradictions == 3
     assert payload.contradictions_truncated is True
     assert len(payload.potential_contradictions) == 1
+    assert payload.model_dump(mode="json", exclude_none=True)["contradiction_check"] == {
+        "status": "completed"
+    }
 
 
 def test_serialise_forgetting_report_caps_decisions():
@@ -196,3 +206,19 @@ def test_typed_tool_errors_produce_stable_payloads():
     assert error.payload.code == "dependency_unavailable"
     assert error.payload.retryable is True
     assert error.payload.details == {"provider": "gemini"}
+
+
+def test_already_running_forgetting_payload_is_model_shaped():
+    payload = ForgettingReportModel(
+        status="already_running",
+        dry_run=True,
+    ).model_dump(mode="json", exclude_none=True)
+
+    assert payload == {
+        "status": "already_running",
+        "dry_run": True,
+        "decisions": [],
+        "displayed_decisions": 0,
+        "total_decisions": 0,
+        "decisions_truncated": False,
+    }
