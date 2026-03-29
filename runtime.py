@@ -35,6 +35,7 @@ class EventRecorder:
         self._events: deque[dict[str, Any]] = deque(maxlen=max_events)
         for event_type in (
             "memory.stored",
+            "memory.updated",
             "memory.retrieved",
             "memory.ranked",
             "memory.accessed",

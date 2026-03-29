@@ -223,6 +223,44 @@ def test_semantic_store_cleans_up_owned_media_on_failure():
     print("  PASS  failed semantic writes clean up owned media")
 
 
+def test_retrieve_filters_superseded_records_by_default():
+    embedder = DeterministicMultimodalEmbedder(dimensions=4)
+    store, _ = fresh_setup(embedder=embedder)
+    active = SemanticMemory(content="Current deployment region is eu-west-1")
+    superseded = SemanticMemory(
+        content="Old deployment region is us-east-1",
+        superseded_by=active.id,
+    )
+    store.store(active)
+    store.store(superseded)
+
+    records = store.get_all_records()
+    results = store.retrieve("deployment region", top_k=5)
+
+    assert {record.id for record in records} == {active.id}
+    assert {record.id for record, _ in results} == {active.id}
+    print("  PASS  semantic recall hides superseded records by default")
+
+
+def test_retrieve_can_include_superseded_records_for_admin_flows():
+    embedder = DeterministicMultimodalEmbedder(dimensions=4)
+    store, _ = fresh_setup(embedder=embedder)
+    active = SemanticMemory(content="Current deployment region is eu-west-1")
+    superseded = SemanticMemory(
+        content="Old deployment region is us-east-1",
+        superseded_by=active.id,
+    )
+    store.store(active)
+    store.store(superseded)
+
+    records = store.get_all_records(include_superseded=True)
+    results = store.retrieve("deployment region", top_k=5, include_superseded=True)
+
+    assert {record.id for record in records} == {active.id, superseded.id}
+    assert {record.id for record, _ in results} == {active.id, superseded.id}
+    print("  PASS  semantic admin recall can include superseded records")
+
+
 def test_get_all_records_returns_full_collection_without_embeddings_by_default():
     store, _ = fresh_setup()
     first = SemanticMemory(content="First fact", importance=0.2)

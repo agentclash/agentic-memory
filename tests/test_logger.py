@@ -43,6 +43,14 @@ def test_console_logger_formats_events():
         },
     )
     bus.emit(
+        "memory.updated",
+        {
+            "record_id": "abc-123",
+            "memory_type": "procedural",
+            "update_type": "procedural_outcome",
+        },
+    )
+    bus.emit(
         "memory.accessed",
         {
             "record_id": "abc-123",
@@ -61,7 +69,10 @@ def test_console_logger_formats_events():
     assert output[2] == (
         "[EVENT] memory.ranked | query='Who created Python?' | top_score=0.8500 | results=1"
     )
-    assert output[3] == "[EVENT] memory.accessed | record_id=abc-123 | count=1"
+    assert output[3] == (
+        "[EVENT] memory.updated | record_id=abc-123 | type=procedural | update=procedural_outcome"
+    )
+    assert output[4] == "[EVENT] memory.accessed | record_id=abc-123 | count=1"
     print("  PASS  ConsoleLogger formats event lines consistently")
 
 

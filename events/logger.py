@@ -14,6 +14,7 @@ class ConsoleLogger:
 
     def register(self, bus: EventBus) -> None:
         bus.subscribe("memory.stored", self.on_memory_stored)
+        bus.subscribe("memory.updated", self.on_memory_updated)
         bus.subscribe("memory.retrieved", self.on_memory_retrieved)
         bus.subscribe("memory.ranked", self.on_memory_ranked)
         bus.subscribe("memory.accessed", self.on_memory_accessed)
@@ -32,6 +33,13 @@ class ConsoleLogger:
         print(
             f"[EVENT] {event.event_type} | query={event.data.get('query')!r} "
             f"| candidates={event.data.get('candidate_count', 0)} | top_sim={top_display}",
+            file=self._stream,
+        )
+
+    def on_memory_updated(self, event: MemoryEvent) -> None:
+        print(
+            f"[EVENT] {event.event_type} | record_id={event.data.get('record_id')} "
+            f"| type={event.data.get('memory_type')} | update={event.data.get('update_type')}",
             file=self._stream,
         )
 

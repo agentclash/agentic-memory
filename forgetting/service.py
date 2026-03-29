@@ -133,8 +133,8 @@ class ForgettingService:
         episodic_store: BaseStore,
         procedural_store: BaseStore,
         media_store: MediaStore,
+        contradiction_detector: ContradictionDetector,
         event_bus: EventBus | None = None,
-        contradiction_detector: ContradictionDetector | None = None,
     ):
         self._stores = {
             "semantic": semantic_store,
@@ -143,7 +143,7 @@ class ForgettingService:
         }
         self._media_store = media_store
         self._event_bus = event_bus
-        self._duplicate_detector = contradiction_detector or ContradictionDetector(semantic_store)
+        self._duplicate_detector = contradiction_detector
 
     def run_cycle(self, dry_run: bool = False) -> ForgettingReport:
         cycle_now = datetime.now(timezone.utc)
@@ -195,8 +195,15 @@ class ForgettingService:
 
     def _scan_records(self) -> dict[str, MemoryRecord]:
         records: dict[str, MemoryRecord] = {}
-        for store in self._stores.values():
-            for record in store.get_all_records(include_embeddings=True):
+        for memory_type, store in self._stores.items():
+            if memory_type == "semantic":
+                scanned = store.get_all_records(  # type: ignore[call-arg]
+                    include_embeddings=True,
+                    include_superseded=True,
+                )
+            else:
+                scanned = store.get_all_records(include_embeddings=True)
+            for record in scanned:
                 records[record.id] = record
         return records
 

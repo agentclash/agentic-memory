@@ -145,6 +145,19 @@ class ProceduralStore(BaseStore):
             return
         record.record_outcome(success)
         self.replace(record)
+        self._emit_event(
+            "memory.updated",
+            {
+                "record_id": record.id,
+                "memory_type": record.memory_type,
+                "update_type": "procedural_outcome",
+                "success": success,
+                "success_count": record.success_count,
+                "failure_count": record.failure_count,
+                "total_outcomes": record.total_outcomes,
+                "wilson_score": record.wilson_score,
+            },
+        )
 
     def get_best_procedures(
         self,

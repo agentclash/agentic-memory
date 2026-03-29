@@ -73,6 +73,11 @@ class EventRecorder:
             bus.subscribe(event_type, self.events.append)
 
 
+class _NoopDuplicateDetector:
+    def find_likely_duplicates_batch(self, threshold=0.95):
+        return []
+
+
 def _media_store():
     root = tempfile.mkdtemp(prefix="forgetting_media_")
     return MediaStore(root), root
@@ -93,7 +98,7 @@ def _make_service(
         procedural_store=FakeStore(procedural_records),
         media_store=media_store,
         event_bus=event_bus,
-        contradiction_detector=FakeDuplicateDetector(duplicate_pairs),
+        contradiction_detector=FakeDuplicateDetector(duplicate_pairs) if duplicate_pairs is not None else _NoopDuplicateDetector(),
     )
     return service, media_root
 

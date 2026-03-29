@@ -1,9 +1,11 @@
 """Verify forgetting endpoints, contradiction lookup, and full cycle integration."""
 
+import asyncio
 import os
 import shutil
 import sys
 import tempfile
+import threading
 
 import httpx
 import pytest
@@ -39,6 +41,7 @@ async def test_semantic_store_returns_potential_contradictions():
         assert r1.status_code == 200
         body1 = r1.json()
         assert "potential_contradictions" in body1
+        assert body1["contradiction_check"]["status"] == "completed"
         assert isinstance(body1["potential_contradictions"], list)
 
         r2 = await client.post(
@@ -48,6 +51,7 @@ async def test_semantic_store_returns_potential_contradictions():
         assert r2.status_code == 200
         body2 = r2.json()
         assert "potential_contradictions" in body2
+        assert body2["contradiction_check"]["status"] == "completed"
 
 
 @pytest.mark.anyio
@@ -60,6 +64,7 @@ async def test_forgetting_preview_returns_stable_report():
         assert response.status_code == 200
         report = response.json()
 
+        assert report["status"] == "completed"
         assert report["dry_run"] is True
         assert report["scanned"] == 2
         assert isinstance(report["decisions"], list)
@@ -94,6 +99,7 @@ async def test_forgetting_run_executes_cycle():
         assert response.status_code == 200
         report = response.json()
 
+        assert report["status"] == "completed"
         assert report["dry_run"] is False
         assert report["scanned"] >= 1
         assert isinstance(report["decisions"], list)
@@ -184,3 +190,67 @@ async def test_full_cycle_supersede_then_prune():
 
         overview = await client.get("/api/overview")
         assert overview.json()["semantic_count"] == 1
+
+
+@pytest.mark.anyio
+async def test_retrieval_hides_superseded_semantic_records_by_default():
+    async with make_client() as client:
+        old_response = await client.post(
+            "/api/memories/semantic",
+            json={"content": "Deployment region is us-east-1"},
+        )
+        old_id = old_response.json()["record"]["id"]
+
+        new_response = await client.post(
+            "/api/memories/semantic",
+            json={"content": "Deployment region is eu-west-1"},
+        )
+        new_id = new_response.json()["record"]["id"]
+
+        resolve = await client.post(
+            "/api/forgetting/resolve",
+            json={"keep_id": new_id, "supersede_id": old_id},
+        )
+        assert resolve.status_code == 200
+
+        query = await client.post(
+            "/api/retrieval/query",
+            json={"query": "deployment region", "top_k": 5, "memory_types": ["semantic"]},
+        )
+
+    assert query.status_code == 200
+    ids = {item["record"]["id"] for item in query.json()["results"]}
+    assert new_id in ids
+    assert old_id not in ids
+
+
+@pytest.mark.anyio
+async def test_overlapping_forgetting_requests_return_already_running():
+    async with make_client() as client:
+        await client.post("/api/memories/semantic", json={"content": "Overlap witness"})
+        await client.get("/api/overview")
+
+        entered = threading.Event()
+        release = threading.Event()
+        original = client.app.state.service.forgetting_service.run_cycle
+
+        def blocking_run_cycle(dry_run: bool = False):
+            entered.set()
+            release.wait()
+            return original(dry_run=dry_run)
+
+        client.app.state.service.forgetting_service.run_cycle = blocking_run_cycle
+
+        first_task = asyncio.create_task(client.post("/api/forgetting/run"))
+        await asyncio.to_thread(entered.wait)
+        second_response = await client.post("/api/forgetting/run")
+        release.set()
+        first_response = await first_task
+
+    assert first_response.status_code == 200
+    assert first_response.json()["status"] == "completed"
+    assert second_response.status_code == 200
+    assert second_response.json() == {
+        "status": "already_running",
+        "dry_run": False,
+    }
