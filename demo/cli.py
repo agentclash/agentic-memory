@@ -9,12 +9,15 @@ from urllib.request import Request, urlopen
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from events import ConsoleLogger
+from events import ConsoleLogger, EventBus
 from models.episodic import EpisodicMemory
 from models.procedural import ProceduralMemory
 from models.semantic import SemanticMemory
-from runtime import build_runtime
+from retrieval.retriever import UnifiedRetriever
+from stores.episodic_store import EpisodicStore
 from stores.media_store import MediaStore
+from stores.procedural_store import ProceduralStore
+from stores.semantic_store import SemanticStore
 from utils.embeddings import GeminiEmbedder, TextEmbedder
 import config
 
@@ -34,10 +37,33 @@ def _make_embedder() -> TextEmbedder:
     return GeminiEmbedder()
 
 
-def _make_runtime():
-    runtime = build_runtime()
-    ConsoleLogger().register(runtime.bus)
-    return runtime
+def _make_bus() -> EventBus:
+    bus = EventBus()
+    ConsoleLogger().register(bus)
+    return bus
+
+
+def _make_semantic_store(event_bus: EventBus | None = None) -> SemanticStore:
+    return SemanticStore(event_bus=event_bus, media_store=_make_media_store())
+
+
+def _make_episodic_store(event_bus: EventBus | None = None) -> EpisodicStore:
+    return EpisodicStore(event_bus=event_bus)
+
+
+def _make_procedural_store(event_bus: EventBus | None = None) -> ProceduralStore:
+    return ProceduralStore(event_bus=event_bus, media_store=_make_media_store())
+
+
+def _make_retriever(event_bus: EventBus | None = None) -> UnifiedRetriever:
+    return UnifiedRetriever(
+        stores={
+            "semantic": _make_semantic_store(event_bus=event_bus),
+            "episodic": _make_episodic_store(event_bus=event_bus),
+            "procedural": _make_procedural_store(event_bus=event_bus),
+        },
+        event_bus=event_bus,
+    )
 
 
 def _guess_mime_type(path: str, modality: str) -> str:
@@ -101,8 +127,9 @@ def _print_best_procedures(results) -> None:
 
 
 def _query_by_media(args, *, modality: str) -> None:
-    runtime = _make_runtime()
+    bus = _make_bus()
     embedder = _make_embedder()
+    retriever = _make_retriever(event_bus=bus)
     source_path = os.path.abspath(args.path)
     mime_type = _guess_mime_type(source_path, modality)
     if modality == "image":
@@ -112,7 +139,7 @@ def _query_by_media(args, *, modality: str) -> None:
     else:
         raise ValueError(f"Unsupported query modality: {modality}")
 
-    results = runtime.retriever.query_by_vector(
+    results = retriever.query_by_vector(
         vector,
         top_k=args.top_k,
         memory_types=args.memory_types,
@@ -125,7 +152,8 @@ def _query_by_media(args, *, modality: str) -> None:
 
 
 def cmd_store(args):
-    runtime = _make_runtime()
+    bus = _make_bus()
+    store = _make_semantic_store(event_bus=bus)
     media_path = None
     modality = "text"
     if args.image:
@@ -142,14 +170,15 @@ def cmd_store(args):
         media_type=_infer_media_type(media_path) if media_path else None,
     )
     try:
-        record_id = runtime.semantic_store.store(record)
+        record_id = store.store(record)
     except (FileNotFoundError, ValueError) as exc:
         _exit_with_error(str(exc))
     print(f"Stored [{record_id[:8]}]: {args.content}")
 
 
 def cmd_store_episode(args):
-    runtime = _make_runtime()
+    bus = _make_bus()
+    store = _make_episodic_store(event_bus=bus)
     media_store = _make_media_store() if args.text is None else None
 
     if args.text is not None:
@@ -173,7 +202,7 @@ def cmd_store_episode(args):
         record.media_ref = media_ref
 
     try:
-        record_id = runtime.episodic_store.store(record)
+        record_id = store.store(record)
     except Exception:
         if media_store is not None and record.media_ref:
             media_store.delete(record.media_ref)
@@ -182,8 +211,9 @@ def cmd_store_episode(args):
 
 
 def cmd_query(args):
-    runtime = _make_runtime()
-    results = runtime.retriever.query(args.query, top_k=args.top_k)
+    bus = _make_bus()
+    retriever = _make_retriever(event_bus=bus)
+    results = retriever.query(args.query, top_k=args.top_k)
     if not results:
         print("No results found.")
         return
