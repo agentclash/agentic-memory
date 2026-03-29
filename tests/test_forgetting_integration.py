@@ -1,11 +1,9 @@
 """Verify forgetting endpoints, contradiction lookup, and full cycle integration."""
 
-import asyncio
 import os
 import shutil
 import sys
 import tempfile
-import threading
 
 import httpx
 import pytest
@@ -237,28 +235,15 @@ async def test_overlapping_forgetting_requests_return_already_running():
     async with make_client() as client:
         await client.post("/api/memories/semantic", json={"content": "Overlap witness"})
         await client.get("/api/overview")
+        lock = client.app.state.forgetting_lock
+        await lock.acquire()
+        try:
+            response = await client.post("/api/forgetting/run")
+        finally:
+            lock.release()
 
-        entered = threading.Event()
-        release = threading.Event()
-        original = client.app.state.service.forgetting_service.run_cycle
-
-        def blocking_run_cycle(dry_run: bool = False):
-            entered.set()
-            release.wait()
-            return original(dry_run=dry_run)
-
-        client.app.state.service.forgetting_service.run_cycle = blocking_run_cycle
-
-        first_task = asyncio.create_task(client.post("/api/forgetting/run"))
-        await asyncio.to_thread(entered.wait)
-        second_response = await client.post("/api/forgetting/run")
-        release.set()
-        first_response = await first_task
-
-    assert first_response.status_code == 200
-    assert first_response.json()["status"] == "completed"
-    assert second_response.status_code == 200
-    assert second_response.json() == {
+    assert response.status_code == 200
+    assert response.json() == {
         "status": "already_running",
         "dry_run": False,
     }

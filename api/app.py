@@ -17,7 +17,6 @@ from fastapi.middleware.cors import CORSMiddleware
 
 import config
 from mcp_server.schemas import (
-    ForgettingReportModel,
     serialise_contradiction_candidate as _mcp_serialise_contradiction_candidate,
     serialise_forgetting_report as _mcp_serialise_forgetting_report,
     serialise_procedural_match as _mcp_serialise_procedural_match,
@@ -343,13 +342,13 @@ def create_app(
         # deployments still need an external coordinator if cross-process
         # forgetting exclusivity becomes a requirement.
         if lock.locked():
-            return ForgettingReportModel(
-                status="already_running",
-                dry_run=dry_run,
-            ).model_dump(mode="json", exclude_none=True)
+            return {
+                "status": "already_running",
+                "dry_run": dry_run,
+            }
 
         async with lock:
-            report = await asyncio.to_thread(service().forgetting_service.run_cycle, dry_run)
+            report = service().forgetting_service.run_cycle(dry_run)
             return _serialise_forgetting_report(report)
 
     @app.get("/health")
