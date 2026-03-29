@@ -60,7 +60,7 @@ def test_find_potential_contradictions_returns_related_candidates_only():
         "Paris is the capital of France": [0.0, 1.0, 0.0],
     }
     store, db_path, media_root, original_db_path = fresh_setup(embedder=FixedVectorEmbedder(vectors))
-    detector = ContradictionDetector()
+    detector = ContradictionDetector(store)
 
     try:
         new_record = SemanticMemory(content="The feature flag is enabled in production")
@@ -70,7 +70,7 @@ def test_find_potential_contradictions_returns_related_candidates_only():
         store.store(unrelated)
         store.store(new_record)
 
-        candidates = detector.find_potential_contradictions(new_record, store, threshold=0.85, top_k=5)
+        candidates = detector.find_potential_contradictions(new_record, threshold=0.85, top_k=5)
 
         assert len(candidates) == 1
         assert candidates[0].record.id == old_conflicting.id
@@ -91,7 +91,7 @@ def test_find_potential_contradictions_emits_flag_event():
         embedder=FixedVectorEmbedder(vectors),
         event_bus=bus,
     )
-    detector = ContradictionDetector()
+    detector = ContradictionDetector(store, event_bus=bus)
 
     try:
         kept = SemanticMemory(content="Mercury is the closest planet to the Sun")
@@ -99,7 +99,7 @@ def test_find_potential_contradictions_emits_flag_event():
         store.store(candidate)
         store.store(kept)
 
-        detector.find_potential_contradictions(kept, store, threshold=0.85, top_k=5)
+        detector.find_potential_contradictions(kept, threshold=0.85, top_k=5)
 
         assert len(recorder.events) == 1
         event = recorder.events[0]
@@ -116,8 +116,13 @@ def test_resolve_supersession_zeroes_old_record_and_persists_bidirectional_link(
         "The service runs in us-east-1": [1.0, 0.0, 0.0],
         "The service runs in eu-west-1": [0.9, 0.1, 0.0],
     }
-    store, db_path, media_root, original_db_path = fresh_setup(embedder=FixedVectorEmbedder(vectors))
-    detector = ContradictionDetector()
+    bus = EventBus()
+    recorder = EventRecorder(bus, "memory.supersession_resolved")
+    store, db_path, media_root, original_db_path = fresh_setup(
+        embedder=FixedVectorEmbedder(vectors),
+        event_bus=bus,
+    )
+    detector = ContradictionDetector(store, event_bus=bus)
 
     try:
         old_record = SemanticMemory(content="The service runs in us-east-1", importance=0.8)
@@ -125,7 +130,7 @@ def test_resolve_supersession_zeroes_old_record_and_persists_bidirectional_link(
         store.store(old_record)
         store.store(new_record)
 
-        detector.resolve_supersession(old_record.id, new_record.id, store)
+        detector.resolve_supersession(old_record.id, new_record.id)
 
         reloaded_old = store.get_by_id(old_record.id)
         reloaded_new = store.get_by_id(new_record.id)
@@ -134,7 +139,41 @@ def test_resolve_supersession_zeroes_old_record_and_persists_bidirectional_link(
         assert reloaded_old.importance == 0.0
         assert reloaded_old.superseded_by == new_record.id
         assert reloaded_new.supersedes == old_record.id
+        assert len(recorder.events) == 1
+        assert recorder.events[0].data["superseded_id"] == old_record.id
+        assert recorder.events[0].data["kept_id"] == new_record.id
         print("  PASS  supersession resolution persists pruning state through store.replace")
+    finally:
+        cleanup(db_path, media_root, original_db_path)
+
+
+def test_resolve_supersession_overwrites_kept_pointer_with_latest_predecessor():
+    vectors = {
+        "A": [1.0, 0.0, 0.0],
+        "B": [0.9, 0.1, 0.0],
+        "C": [0.8, 0.2, 0.0],
+    }
+    store, db_path, media_root, original_db_path = fresh_setup(embedder=FixedVectorEmbedder(vectors))
+    detector = ContradictionDetector(store)
+
+    try:
+        first = SemanticMemory(content="A")
+        second = SemanticMemory(content="B")
+        third = SemanticMemory(content="C")
+        store.store(first)
+        store.store(second)
+        store.store(third)
+
+        detector.resolve_supersession(first.id, second.id)
+        detector.resolve_supersession(second.id, third.id)
+
+        reloaded_second = store.get_by_id(second.id)
+        reloaded_third = store.get_by_id(third.id)
+        assert reloaded_second is not None
+        assert reloaded_third is not None
+        assert reloaded_second.superseded_by == third.id
+        assert reloaded_third.supersedes == second.id
+        print("  PASS  supersession keeps only the latest predecessor link on the kept record")
     finally:
         cleanup(db_path, media_root, original_db_path)
 
@@ -147,7 +186,7 @@ def test_find_likely_duplicates_batch_returns_only_very_high_similarity_pairs():
         "The moon orbits Earth": [0.0, 1.0, 0.0],
     }
     store, db_path, media_root, original_db_path = fresh_setup(embedder=FixedVectorEmbedder(vectors))
-    detector = ContradictionDetector()
+    detector = ContradictionDetector(store)
 
     try:
         first = SemanticMemory(content="Kubernetes runs containers")
@@ -157,7 +196,7 @@ def test_find_likely_duplicates_batch_returns_only_very_high_similarity_pairs():
         for record in (first, second, third, fourth):
             store.store(record)
 
-        duplicates = detector.find_likely_duplicates_batch(store, threshold=0.95)
+        duplicates = detector.find_likely_duplicates_batch(threshold=0.95)
 
         assert len(duplicates) == 1
         assert {duplicates[0][0], duplicates[0][1]} == {first.id, second.id}
@@ -172,5 +211,6 @@ if __name__ == "__main__":
     test_find_potential_contradictions_returns_related_candidates_only()
     test_find_potential_contradictions_emits_flag_event()
     test_resolve_supersession_zeroes_old_record_and_persists_bidirectional_link()
+    test_resolve_supersession_overwrites_kept_pointer_with_latest_predecessor()
     test_find_likely_duplicates_batch_returns_only_very_high_similarity_pairs()
     print("\nAll tests passed.")
