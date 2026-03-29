@@ -42,8 +42,15 @@ class FakeStore(BaseStore):
     def get_by_id(self, record_id):
         return self._records.get(record_id)
 
-    def get_all_records(self, include_embeddings: bool = False):
+    def get_all_records(
+        self,
+        include_embeddings: bool = False,
+        *,
+        include_superseded: bool = False,
+    ):
         records = list(self._records.values())
+        if not include_superseded:
+            records = [record for record in records if not getattr(record, "superseded_by", None)]
         if include_embeddings:
             return records
         return [replace(record, embedding=None) for record in records]
