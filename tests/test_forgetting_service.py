@@ -73,6 +73,24 @@ class FakeStore(BaseStore):
         self._records[record.id] = record
 
 
+class TrackingSemanticStore(FakeStore):
+    def __init__(self, records=None):
+        super().__init__(records)
+        self.last_include_superseded = None
+
+    def get_all_records(
+        self,
+        include_embeddings: bool = False,
+        *,
+        include_superseded: bool = False,
+    ):
+        self.last_include_superseded = include_superseded
+        return super().get_all_records(
+            include_embeddings=include_embeddings,
+            include_superseded=include_superseded,
+        )
+
+
 class EventRecorder:
     def __init__(self, bus: EventBus, *event_types: str):
         self.events = []
@@ -112,6 +130,31 @@ def _make_service(
 
 def _ids_for(report):
     return {decision.record_id: decision for decision in report.decisions}
+
+
+def test_scan_records_includes_superseded_semantic_rows():
+    superseded = SemanticMemory(
+        id="semantic-old",
+        content="Old fact",
+        superseded_by="semantic-new",
+    )
+    active = SemanticMemory(
+        id="semantic-new",
+        content="New fact",
+    )
+    semantic_store = TrackingSemanticStore([superseded, active])
+    service = ForgettingService(
+        semantic_store=semantic_store,
+        episodic_store=FakeStore(),
+        procedural_store=FakeStore(),
+        media_store=MediaStore(tempfile.mkdtemp(prefix="forgetting_media_scan_")),
+        contradiction_detector=_NoopDuplicateDetector(),
+    )
+
+    records = service._scan_records()
+
+    assert semantic_store.last_include_superseded is True
+    assert {"semantic-old", "semantic-new"} <= set(records)
 
 
 def test_dry_run_resolves_duplicate_clusters_component_wise(monkeypatch):

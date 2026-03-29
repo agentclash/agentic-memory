@@ -112,6 +112,11 @@ class SemanticStore(BaseStore):
     ) -> list[tuple[SemanticMemory, float]]:
         n_results = max(1, top_k)
         if not include_superseded:
+            # We need enough raw candidates to still return `top_k` active
+            # records after filtering superseded ones, and Chroma cannot apply
+            # that predicate natively for us. This makes default semantic recall
+            # O(N) in collection size, which is acceptable for the current
+            # scale but should be revisited if the store grows substantially.
             n_results = max(1, self._collection.count())
         result = self._collection.query(
             query_embeddings=[vector],

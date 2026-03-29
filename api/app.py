@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import mimetypes
 import os
 import tempfile
@@ -34,6 +35,7 @@ DEFAULT_ALLOWED_ORIGINS = [
 DEFAULT_MEDIA_DIR = Path(os.getenv("MEMORY_MEDIA_DIR", config.MEDIA_STORAGE_PATH))
 _SUPPORTED_FILE_MODALITIES = {"audio", "image", "video", "multimodal"}
 _ALLOWED_MEDIA_TYPES = {"image", "audio", "video", "pdf"}
+logger = logging.getLogger(__name__)
 
 
 def _normalise_origins(origins: list[str] | None = None) -> list[str]:
@@ -344,6 +346,7 @@ def _safe_contradiction_lookup(
     except ValueError as exc:
         return ContradictionCheckResult(status="skipped", candidates=[], detail=str(exc))
     except Exception as exc:
+        logger.exception("Contradiction lookup failed for semantic record %s", record.id)
         return ContradictionCheckResult(status="error", candidates=[], detail=str(exc))
 
 
@@ -418,6 +421,9 @@ def create_app(
 
     async def run_forgetting_cycle(*, dry_run: bool) -> dict[str, Any]:
         lock = app.state.forgetting_lock
+        # This is intentionally single-flight per app process. Multi-worker
+        # deployments still need an external coordinator if cross-process
+        # forgetting exclusivity becomes a requirement.
         if lock.locked():
             return {
                 "status": "already_running",
