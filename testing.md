@@ -104,7 +104,7 @@ Each decision entry must include:
 - `record_id`
 - `memory_type`
 - `action`
-- `reason`
+- `reason` (`null` for retained records with no forgetting pressure)
 - `score`
 - `media_deleted`
 
@@ -123,7 +123,8 @@ Events:
 2. `dry_run=True` does not mutate any record, delete any record, or delete any
    media file.
 3. All decisions in one cycle use the same `cycle_now` reference time.
-4. The report includes keep, fade, and prune decisions with stable reasons.
+4. The report includes keep, fade, and prune decisions with stable reasons, and
+   keep decisions above the fade threshold carry `reason = null`.
 5. Top-level counts are derived from decisions rather than maintained
    separately.
 

@@ -38,11 +38,12 @@ class ForgettingDecision:
     record_id: str
     memory_type: str
     action: str
-    reason: str
+    reason: str | None
     score: float
     media_deleted: bool = False
     executed: bool = False
-    skip_reason: str | None = None
+    record_skip_reason: str | None = None
+    media_skip_reason: str | None = None
     old_importance: float | None = None
     new_importance: float | None = None
 
@@ -70,10 +71,10 @@ class ForgettingReport:
         )
         self.media_deleted = sum(1 for decision in self.decisions if decision.media_deleted)
         self.skipped_records = sum(
-            1 for decision in self.decisions if decision.skip_reason == "missing_record"
+            1 for decision in self.decisions if decision.record_skip_reason == "missing_record"
         )
         self.skipped_media = sum(
-            1 for decision in self.decisions if decision.skip_reason == "missing_media"
+            1 for decision in self.decisions if decision.media_skip_reason == "missing_media"
         )
 
         counts = {
@@ -121,7 +122,7 @@ class ForgettingReport:
 class _PlannedDecision:
     record: MemoryRecord
     action: str
-    reason: str
+    reason: str | None
     score: float
 
 
@@ -171,21 +172,21 @@ class ForgettingService:
 
         planned: list[_PlannedDecision] = []
         for record in all_records.values():
+            reason = self._select_reason(
+                record,
+                score=scores[record.id],
+                active_superseded_ids=active_superseded_ids,
+                duplicate_prune_ids=duplicate_prune_ids,
+            )
             planned.append(
                 _PlannedDecision(
                     record=record,
-                    action=self._select_action(
+                    action=self._action_for_reason(
+                        reason,
                         record,
                         score=scores[record.id],
-                        active_superseded_ids=active_superseded_ids,
-                        duplicate_prune_ids=duplicate_prune_ids,
                     ),
-                    reason=self._select_reason(
-                        record,
-                        score=scores[record.id],
-                        active_superseded_ids=active_superseded_ids,
-                        duplicate_prune_ids=duplicate_prune_ids,
-                    ),
+                    reason=reason,
                     score=scores[record.id],
                 )
             )
@@ -279,26 +280,22 @@ class ForgettingService:
             float(getattr(record, "importance", 0.0)),
             int(getattr(record, "access_count", 0)),
             created_at.timestamp(),
+            # IDs are UUID-like ASCII strings in this codebase, so inverting each
+            # byte gives us a deterministic descending fallback while still using
+            # Python's normal tuple comparison.
             self._descending_string_key(record.id),
         )
 
     def _descending_string_key(self, value: str) -> str:
         return "".join(chr(255 - ord(char)) for char in value)
 
-    def _select_action(
+    def _action_for_reason(
         self,
+        reason: str | None,
         record: MemoryRecord,
         *,
         score: float,
-        active_superseded_ids: set[str],
-        duplicate_prune_ids: set[str],
     ) -> str:
-        reason = self._select_reason(
-            record,
-            score=score,
-            active_superseded_ids=active_superseded_ids,
-            duplicate_prune_ids=duplicate_prune_ids,
-        )
         if reason in {_REASON_SUPERSEDED, _REASON_LIKELY_DUPLICATE}:
             return _ACTION_PRUNE
 
@@ -323,7 +320,7 @@ class ForgettingService:
         score: float,
         active_superseded_ids: set[str],
         duplicate_prune_ids: set[str],
-    ) -> str:
+    ) -> str | None:
         candidates: list[str] = []
         if record.id in active_superseded_ids:
             candidates.append(_REASON_SUPERSEDED)
@@ -336,7 +333,7 @@ class ForgettingService:
         if score < fade_threshold:
             candidates.append(_REASON_TIME_DECAY)
         if not candidates:
-            return _REASON_TIME_DECAY
+            return None
         return min(candidates, key=lambda candidate: _REASON_PRIORITY[candidate])
 
     def _thresholds_for(self, memory_type: str) -> tuple[float, float]:
@@ -416,7 +413,7 @@ class ForgettingService:
                 decision = by_id[item.record.id]
                 current = store.get_by_id(item.record.id)
                 if current is None:
-                    decision.skip_reason = "missing_record"
+                    decision.record_skip_reason = "missing_record"
                     continue
 
                 had_media = bool(current.media_ref)
@@ -433,7 +430,7 @@ class ForgettingService:
                         self._media_store.delete(media_ref)
                         decision.media_deleted = True
                     else:
-                        decision.skip_reason = "missing_media"
+                        decision.media_skip_reason = "missing_media"
 
                 self._emit_event(
                     "memory.pruned",

@@ -256,7 +256,7 @@ def test_supersession_forces_prune_only_when_successor_exists(monkeypatch):
         assert decisions["old"].action == "prune"
         assert decisions["old"].reason == "superseded"
         assert decisions["maybe-old"].action == "keep"
-        assert decisions["maybe-old"].reason == "time_decay"
+        assert decisions["maybe-old"].reason is None
         print("  PASS  supersession forced-prunes only when the replacement record still exists")
     finally:
         shutil.rmtree(media_root, ignore_errors=True)
@@ -315,6 +315,15 @@ def test_real_run_stages_fade_and_prune_then_deletes_owned_media(monkeypatch):
             "memory.pruned",
             "forgetting.cycle_completed",
         ]
+        assert recorder.events[0].data["record_id"] == "fade-me"
+        assert recorder.events[0].data["reason"] == "time_decay"
+        assert recorder.events[0].data["old_importance"] == 0.8
+        assert recorder.events[0].data["new_importance"] == pytest.approx(0.4)
+        assert recorder.events[1].data["record_id"] == "prune-me"
+        assert recorder.events[1].data["reason"] == "time_decay"
+        assert recorder.events[1].data["had_media"] is True
+        assert recorder.events[2].data["pruned"] == 1
+        assert recorder.events[2].data["media_deleted"] == 1
         print("  PASS  real run applies staged fades and prunes before deleting owned media")
     finally:
         shutil.rmtree(media_root, ignore_errors=True)
@@ -379,7 +388,7 @@ def test_missing_record_is_tracked_as_skipped_not_pruned(monkeypatch):
         decision = _ids_for(report)["missing-prune"]
 
         assert decision.executed is False
-        assert decision.skip_reason == "missing_record"
+        assert decision.record_skip_reason == "missing_record"
         assert report.pruned == 0
         assert report.skipped_records == 1
         print("  PASS  records missing at delete time are reported as skipped instead of successful prunes")
@@ -394,5 +403,99 @@ def test_iter_chunks_batches_prunes_in_groups_of_ten():
         chunks = service._iter_chunks(list(range(21)), 10)
         assert [len(chunk) for chunk in chunks] == [10, 10, 1]
         print("  PASS  prune execution batching splits work into groups of ten")
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+
+
+def test_fade_floor_clamps_tiny_importance_values(monkeypatch):
+    record = SemanticMemory(
+        id="tiny-fade",
+        content="Tiny fade",
+        importance=0.001,
+        created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr("forgetting.service.compute_decay_score", lambda record, now=None: 0.15)
+    service, media_root = _make_service(semantic_records=[record])
+
+    try:
+        report = service.run_cycle(dry_run=False)
+        decision = _ids_for(report)["tiny-fade"]
+
+        assert decision.new_importance == pytest.approx(0.01)
+        assert service._stores["semantic"].get_by_id("tiny-fade").importance == pytest.approx(0.01)
+        print("  PASS  fade floor prevents tiny importance values from collapsing below the configured minimum")
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+
+
+def test_one_cycle_applies_type_specific_thresholds_across_all_stores(monkeypatch):
+    semantic = SemanticMemory(id="sem", content="semantic", importance=0.6)
+    episodic = EpisodicMemory(id="epi", content="episodic", session_id="s", importance=0.6)
+    procedural = ProceduralMemory(
+        id="proc",
+        content="procedural",
+        steps=["One"],
+        importance=0.6,
+        success_count=10,
+        failure_count=0,
+    )
+
+    monkeypatch.setattr(
+        "forgetting.service.compute_decay_score",
+        lambda record, now=None: {
+            "sem": 0.15,
+            "epi": 0.25,
+            "proc": 0.35,
+        }[record.id],
+    )
+    service, media_root = _make_service(
+        semantic_records=[semantic],
+        episodic_records=[episodic],
+        procedural_records=[procedural],
+    )
+
+    try:
+        report = service.run_cycle(dry_run=True)
+        decisions = _ids_for(report)
+
+        assert decisions["sem"].action == "fade"
+        assert decisions["epi"].action == "fade"
+        assert decisions["proc"].action == "keep"
+        assert report.by_type["semantic"]["fade"] == 1
+        assert report.by_type["episodic"]["fade"] == 1
+        assert report.by_type["procedural"]["keep"] == 1
+        print("  PASS  one cycle respects type-specific thresholds across semantic, episodic, and procedural stores")
+    finally:
+        shutil.rmtree(media_root, ignore_errors=True)
+
+
+def test_supersession_reason_beats_duplicate_reason_when_both_apply(monkeypatch):
+    superseded = SemanticMemory(
+        id="old",
+        content="Old fact",
+        importance=0.9,
+        superseded_by="new",
+        created_at=datetime(2026, 3, 1, tzinfo=timezone.utc),
+    )
+    current = SemanticMemory(
+        id="new",
+        content="New fact",
+        importance=0.8,
+        created_at=datetime(2026, 3, 2, tzinfo=timezone.utc),
+    )
+
+    monkeypatch.setattr("forgetting.service.compute_decay_score", lambda record, now=None: 0.95)
+    service, media_root = _make_service(
+        semantic_records=[superseded, current],
+        duplicate_pairs=[("old", "new", 0.99)],
+    )
+
+    try:
+        report = service.run_cycle(dry_run=True)
+        decision = _ids_for(report)["old"]
+
+        assert decision.action == "prune"
+        assert decision.reason == "superseded"
+        print("  PASS  supersession outranks duplicate handling when both apply to the same record")
     finally:
         shutil.rmtree(media_root, ignore_errors=True)
