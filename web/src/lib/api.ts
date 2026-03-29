@@ -53,6 +53,39 @@ export type ProceduralMatchResult = {
   combined_score: number;
 };
 
+export type ContradictionCandidate = {
+  record: MemoryRecord;
+  similarity: number;
+};
+
+export type ForgettingDecision = {
+  record_id: string;
+  memory_type: string;
+  action: string;
+  reason: string | null;
+  score: number;
+  media_deleted: boolean;
+  executed: boolean;
+  record_skip_reason: string | null;
+  media_skip_reason: string | null;
+  old_importance: number | null;
+  new_importance: number | null;
+};
+
+export type ForgettingReport = {
+  dry_run: boolean;
+  scanned: number;
+  kept: number;
+  faded: number;
+  pruned: number;
+  media_deleted: number;
+  duplicates_flagged: number;
+  skipped_records: number;
+  skipped_media: number;
+  by_type: Record<string, Record<string, number>>;
+  decisions: ForgettingDecision[];
+};
+
 const API_BASE = process.env.NEXT_PUBLIC_MEMORY_API_BASE_URL ?? "http://localhost:8000";
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
@@ -90,10 +123,13 @@ export function createSemanticMemory(input: {
   category?: string;
   confidence?: number;
 }) {
-  return request<{ record: MemoryRecord }>("/api/memories/semantic", {
-    method: "POST",
-    body: JSON.stringify(input),
-  });
+  return request<{ record: MemoryRecord; potential_contradictions: ContradictionCandidate[] }>(
+    "/api/memories/semantic",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
 }
 
 export function createTextEpisode(input: {
@@ -206,4 +242,22 @@ export function getSessionEpisodes(sessionId: string) {
 export function getTimeRangeEpisodes(startIso: string, endIso: string) {
   const params = new URLSearchParams({ start: startIso, end: endIso });
   return request<{ records: MemoryRecord[] }>(`/api/episodes/time-range?${params.toString()}`);
+}
+
+export function forgettingPreview() {
+  return request<ForgettingReport>("/api/forgetting/preview", { method: "POST" });
+}
+
+export function forgettingRun() {
+  return request<ForgettingReport>("/api/forgetting/run", { method: "POST" });
+}
+
+export function forgettingResolve(input: { keep_id: string; supersede_id: string }) {
+  return request<{ superseded_id: string; kept_id: string; status: string }>(
+    "/api/forgetting/resolve",
+    {
+      method: "POST",
+      body: JSON.stringify(input),
+    },
+  );
 }

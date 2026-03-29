@@ -25,6 +25,8 @@ from stores.episodic_store import EpisodicStore, EpisodicStoreError, MediaTooLar
 from stores.media_store import MediaStore
 from stores.procedural_store import ProceduralMatch, ProceduralStore
 from stores.semantic_store import SemanticStore
+from forgetting.contradiction import ContradictionCandidate, ContradictionDetector
+from forgetting.service import ForgettingReport, ForgettingService
 from utils.embeddings import EmbeddingProviderError, GeminiEmbedder, TextEmbedder
 
 DEFAULT_ALLOWED_ORIGINS = [
@@ -280,7 +282,18 @@ def _serialise_procedural_match(match: ProceduralMatch) -> dict[str, Any]:
 class EventRecorder:
     def __init__(self, bus: EventBus, *, max_events: int = 200):
         self._events: deque[dict[str, Any]] = deque(maxlen=max_events)
-        for event_type in ("memory.stored", "memory.retrieved", "memory.ranked", "memory.accessed"):
+        for event_type in (
+            "memory.stored",
+            "memory.retrieved",
+            "memory.ranked",
+            "memory.accessed",
+            "memory.contradiction_flagged",
+            "memory.supersession_resolved",
+            "memory.faded",
+            "memory.forgotten",
+            "forgetting.cycle_completed",
+            "forgetting.cycle_dry_run",
+        ):
             bus.subscribe(event_type, self._record)
 
     def _record(self, event: MemoryEvent) -> None:
@@ -336,6 +349,17 @@ class MemoryAPIService:
             },
             event_bus=self.bus,
         )
+        self.contradiction_detector = ContradictionDetector(
+            self.semantic_store, event_bus=self.bus,
+        )
+        self.forgetting_service = ForgettingService(
+            semantic_store=self.semantic_store,
+            episodic_store=self.episodic_store,
+            procedural_store=self.procedural_store,
+            media_store=self.media_store,
+            event_bus=self.bus,
+            contradiction_detector=self.contradiction_detector,
+        )
         self.events = EventRecorder(self.bus)
 
     def save_upload(self, upload: UploadFile, memory_id: str) -> tuple[str, str]:
@@ -369,6 +393,54 @@ class MemoryAPIService:
             "recent_sessions": sorted({record.session_id for record in recent}),
             "latest_events": self.events.snapshot(10),
         }
+
+
+def _safe_contradiction_lookup(
+    active_service: MemoryAPIService,
+    record: SemanticMemory,
+) -> list[ContradictionCandidate]:
+    try:
+        return active_service.contradiction_detector.find_potential_contradictions(record)
+    except (ValueError, Exception):
+        return []
+
+
+def _serialise_contradiction_candidate(candidate: ContradictionCandidate) -> dict[str, Any]:
+    return {
+        "record": _serialise_record(candidate.record),
+        "similarity": candidate.similarity,
+    }
+
+
+def _serialise_forgetting_report(report: ForgettingReport) -> dict[str, Any]:
+    return {
+        "dry_run": report.dry_run,
+        "scanned": report.scanned,
+        "kept": report.kept,
+        "faded": report.faded,
+        "pruned": report.pruned,
+        "media_deleted": report.media_deleted,
+        "duplicates_flagged": report.duplicates_flagged,
+        "skipped_records": report.skipped_records,
+        "skipped_media": report.skipped_media,
+        "by_type": dict(report.by_type),
+        "decisions": [
+            {
+                "record_id": d.record_id,
+                "memory_type": d.memory_type,
+                "action": d.action,
+                "reason": d.reason,
+                "score": d.score,
+                "media_deleted": d.media_deleted,
+                "executed": d.executed,
+                "record_skip_reason": d.record_skip_reason,
+                "media_skip_reason": d.media_skip_reason,
+                "old_importance": d.old_importance,
+                "new_importance": d.new_importance,
+            }
+            for d in report.decisions
+        ],
+    }
 
 
 def create_app(
@@ -465,7 +537,13 @@ def create_app(
         except Exception:
             _cleanup_owned_media(active_service, record.media_ref)
             raise
-        return {"record": _serialise_record(record)}
+        candidates = _safe_contradiction_lookup(active_service, record)
+        return {
+            "record": _serialise_record(record),
+            "potential_contradictions": [
+                _serialise_contradiction_candidate(c) for c in candidates
+            ],
+        }
 
     @app.post("/api/memories/episodic/text")
     async def create_text_episode(payload: dict[str, Any]) -> dict[str, Any]:
@@ -782,6 +860,35 @@ def create_app(
     async def by_time_range(start: datetime, end: datetime) -> dict[str, Any]:
         records = service().retriever.query_time_range(start, end)
         return {"records": [_serialise_record(record) for record in records]}
+
+    @app.post("/api/forgetting/preview")
+    async def forgetting_preview() -> dict[str, Any]:
+        report = service().forgetting_service.run_cycle(dry_run=True)
+        return _serialise_forgetting_report(report)
+
+    @app.post("/api/forgetting/run")
+    async def forgetting_run() -> dict[str, Any]:
+        report = service().forgetting_service.run_cycle(dry_run=False)
+        return _serialise_forgetting_report(report)
+
+    @app.post("/api/forgetting/resolve")
+    async def forgetting_resolve(payload: dict[str, Any]) -> dict[str, Any]:
+        keep_id = payload.get("keep_id")
+        supersede_id = payload.get("supersede_id")
+        if not keep_id or not supersede_id:
+            raise HTTPException(status_code=400, detail="keep_id and supersede_id are required")
+        try:
+            service().contradiction_detector.resolve_supersession(
+                superseded_id=supersede_id,
+                kept_id=keep_id,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=404, detail=str(exc)) from exc
+        return {
+            "superseded_id": supersede_id,
+            "kept_id": keep_id,
+            "status": "resolved",
+        }
 
     return app
 
