@@ -440,7 +440,7 @@ class ForgettingService:
                         decision.media_skip_reason = "missing_media"
 
                 self._emit_event(
-                    "memory.pruned",
+                    "memory.forgotten",
                     {
                         "record_id": decision.record_id,
                         "memory_type": decision.memory_type,

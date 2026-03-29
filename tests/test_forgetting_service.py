@@ -138,7 +138,7 @@ def test_dry_run_resolves_duplicate_clusters_component_wise(monkeypatch):
     )
 
     bus = EventBus()
-    recorder = EventRecorder(bus, "forgetting.cycle_dry_run", "memory.pruned", "memory.faded")
+    recorder = EventRecorder(bus, "forgetting.cycle_dry_run", "memory.forgotten", "memory.faded")
     service, media_root = _make_service(
         semantic_records=[first, second, third, unrelated],
         duplicate_pairs=[
@@ -278,7 +278,7 @@ def test_real_run_stages_fade_and_prune_then_deletes_owned_media(monkeypatch):
     )
 
     bus = EventBus()
-    recorder = EventRecorder(bus, "memory.faded", "memory.pruned", "forgetting.cycle_completed")
+    recorder = EventRecorder(bus, "memory.faded", "memory.forgotten", "forgetting.cycle_completed")
     service, media_root = _make_service(
         semantic_records=[fade_record],
         episodic_records=[prune_record],
@@ -312,7 +312,7 @@ def test_real_run_stages_fade_and_prune_then_deletes_owned_media(monkeypatch):
         assert report.media_deleted == 1
         assert [event.event_type for event in recorder.events] == [
             "memory.faded",
-            "memory.pruned",
+            "memory.forgotten",
             "forgetting.cycle_completed",
         ]
         assert recorder.events[0].data["record_id"] == "fade-me"

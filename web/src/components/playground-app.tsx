@@ -30,10 +30,15 @@ import {
 } from "lucide-react";
 import {
   checkHealth,
+  type ContradictionCandidate,
   createFileEpisode,
   createProcedure,
   createSemanticMemory,
   createTextEpisode,
+  type ForgettingReport,
+  forgettingPreview,
+  forgettingResolve,
+  forgettingRun,
   getBestProcedures,
   getEvents,
   getOverview,
@@ -56,7 +61,7 @@ import {
 /* ------------------------------------------------------------------ */
 
 type Notice = { tone: "ok" | "error"; text: string } | null;
-type SidebarTab = "store" | "explore";
+type SidebarTab = "store" | "explore" | "forgetting";
 type StoreMode = "semantic" | "text" | "file" | "procedure";
 type ExploreMode = "recent" | "session" | "time";
 type QueryMode = "text" | "image" | "audio" | "best-procedure";
@@ -663,6 +668,12 @@ export function PlaygroundApp() {
   const [exploreRecords, setExploreRecords] = useState<MemoryRecord[]>([]);
   const [exploreLabel, setExploreLabel] = useState("");
 
+  /* ---- forgetting ---- */
+  const [forgettingReport, setForgettingReport] = useState<ForgettingReport | null>(null);
+  const [contradictions, setContradictions] = useState<ContradictionCandidate[]>([]);
+  const [resolveKeepId, setResolveKeepId] = useState("");
+  const [resolveSupersedId, setResolveSupersedId] = useState("");
+
   /* ================================================================ */
   /*  Effects                                                          */
   /* ================================================================ */
@@ -738,7 +749,12 @@ export function PlaygroundApp() {
     );
     if (result) {
       setSemContent("");
-      setNotice({ tone: "ok", text: `Stored semantic memory ${result.record.id.slice(0, 8)}` });
+      const candidates = result.potential_contradictions ?? [];
+      setContradictions(candidates);
+      const suffix = candidates.length
+        ? ` — ${candidates.length} potential contradiction${candidates.length > 1 ? "s" : ""} found`
+        : "";
+      setNotice({ tone: "ok", text: `Stored semantic memory ${result.record.id.slice(0, 8)}${suffix}` });
     }
   }
 
@@ -934,6 +950,46 @@ export function PlaygroundApp() {
     }
   }
 
+  /* ---- forgetting ---- */
+  async function handleForgettingPreview() {
+    const result = await withBusy("Previewing cycle", forgettingPreview);
+    if (result) {
+      setForgettingReport(result);
+      setNotice({
+        tone: "ok",
+        text: `Preview: ${result.faded} fade, ${result.pruned} prune, ${result.kept} keep`,
+      });
+    }
+  }
+
+  async function handleForgettingRun() {
+    const result = await withBusy("Running cycle", forgettingRun);
+    if (result) {
+      setForgettingReport(result);
+      refreshData();
+      setNotice({
+        tone: "ok",
+        text: `Cycle complete: ${result.faded} faded, ${result.pruned} pruned, ${result.media_deleted} media deleted`,
+      });
+    }
+  }
+
+  async function handleResolve(e: FormEvent) {
+    e.preventDefault();
+    if (!resolveKeepId.trim() || !resolveSupersedId.trim()) return;
+    const result = await withBusy("Resolving supersession", () =>
+      forgettingResolve({
+        keep_id: resolveKeepId.trim(),
+        supersede_id: resolveSupersedId.trim(),
+      }),
+    );
+    if (result) {
+      setResolveKeepId("");
+      setResolveSupersedId("");
+      setNotice({ tone: "ok", text: `Superseded ${result.superseded_id.slice(0, 8)} → kept ${result.kept_id.slice(0, 8)}` });
+    }
+  }
+
   /* ================================================================ */
   /*  Render                                                           */
   /* ================================================================ */
@@ -1025,6 +1081,9 @@ export function PlaygroundApp() {
             </TabButton>
             <TabButton active={sidebarTab === "explore"} onClick={() => setSidebarTab("explore")}>
               Explore
+            </TabButton>
+            <TabButton active={sidebarTab === "forgetting"} onClick={() => setSidebarTab("forgetting")}>
+              Forgetting
             </TabButton>
           </div>
 
@@ -1356,6 +1415,128 @@ export function PlaygroundApp() {
                 </form>
               )}
             </>
+          )}
+
+          {/* ---- Forgetting tab ---- */}
+          {sidebarTab === "forgetting" && (
+            <div className="space-y-5 p-5">
+              {/* cycle controls */}
+              <div>
+                <p className="mb-3 text-[11px] font-medium uppercase tracking-wider text-[var(--text-4)]">
+                  Forgetting cycle
+                </p>
+                <div className="flex gap-2">
+                  <button
+                    type="button"
+                    disabled={isBusy}
+                    onClick={handleForgettingPreview}
+                    className="flex items-center gap-1.5 rounded-lg bg-white/[0.06] px-3 py-1.5 text-xs font-medium text-[var(--text-2)] transition hover:bg-white/[0.1] disabled:opacity-40"
+                  >
+                    <Search className="size-3" />
+                    Preview
+                  </button>
+                  <button
+                    type="button"
+                    disabled={isBusy}
+                    onClick={handleForgettingRun}
+                    className="flex items-center gap-1.5 rounded-lg bg-red-500/10 px-3 py-1.5 text-xs font-medium text-red-300 transition hover:bg-red-500/20 disabled:opacity-40"
+                  >
+                    <Trash2 className="size-3" />
+                    Run cycle
+                  </button>
+                </div>
+              </div>
+
+              {/* resolve */}
+              <form className="space-y-3" onSubmit={handleResolve}>
+                <p className="text-[11px] font-medium uppercase tracking-wider text-[var(--text-4)]">
+                  Resolve supersession
+                </p>
+                <div>
+                  <FormLabel>Keep ID</FormLabel>
+                  <FieldInput
+                    value={resolveKeepId}
+                    onChange={(e) => setResolveKeepId(e.target.value)}
+                    placeholder="ID of the record to keep"
+                  />
+                </div>
+                <div>
+                  <FormLabel>Supersede ID</FormLabel>
+                  <FieldInput
+                    value={resolveSupersedId}
+                    onChange={(e) => setResolveSupersedId(e.target.value)}
+                    placeholder="ID of the record to replace"
+                  />
+                </div>
+                <SubmitButton disabled={isBusy || !resolveKeepId.trim() || !resolveSupersedId.trim()} small>
+                  Resolve
+                </SubmitButton>
+              </form>
+
+              {/* contradiction candidates */}
+              {contradictions.length > 0 && (
+                <div>
+                  <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-[var(--text-4)]">
+                    Recent contradictions
+                  </p>
+                  <div className="space-y-2">
+                    {contradictions.map((c) => (
+                      <div
+                        key={c.record.id}
+                        className="rounded-lg border border-amber-500/20 bg-amber-500/5 p-3 text-xs"
+                      >
+                        <p className="text-[var(--text-2)]">{c.record.content}</p>
+                        <p className="mt-1 text-[var(--text-4)]">
+                          similarity {(c.similarity * 100).toFixed(1)}% &middot; {c.record.id.slice(0, 8)}
+                        </p>
+                        <button
+                          type="button"
+                          className="mt-2 rounded bg-amber-500/10 px-2 py-1 text-[10px] font-medium text-amber-300 hover:bg-amber-500/20"
+                          onClick={() => {
+                            setResolveSupersedId(c.record.id);
+                            setNotice({ tone: "ok", text: `Supersede ID set to ${c.record.id.slice(0, 8)}` });
+                          }}
+                        >
+                          Use as superseded
+                        </button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* report */}
+              {forgettingReport && (
+                <div>
+                  <p className="mb-2 text-[11px] font-medium uppercase tracking-wider text-[var(--text-4)]">
+                    {forgettingReport.dry_run ? "Preview report" : "Cycle report"}
+                  </p>
+                  <div className="space-y-1 rounded-lg border border-[var(--border)] bg-[var(--bg-alt)] p-3 text-xs">
+                    <p className="text-[var(--text-2)]">
+                      Scanned {forgettingReport.scanned} &middot; Kept {forgettingReport.kept} &middot;
+                      Faded {forgettingReport.faded} &middot; Pruned {forgettingReport.pruned}
+                    </p>
+                    {forgettingReport.duplicates_flagged > 0 && (
+                      <p className="text-amber-300">
+                        {forgettingReport.duplicates_flagged} duplicate{forgettingReport.duplicates_flagged > 1 ? "s" : ""}
+                      </p>
+                    )}
+                    {forgettingReport.media_deleted > 0 && (
+                      <p className="text-[var(--text-3)]">{forgettingReport.media_deleted} media files deleted</p>
+                    )}
+                    {forgettingReport.decisions
+                      .filter((d) => d.action !== "keep")
+                      .map((d) => (
+                        <p key={d.record_id} className="text-[var(--text-4)]">
+                          {d.action} {d.memory_type} {d.record_id.slice(0, 8)} — {d.reason ?? "decay"}{" "}
+                          ({d.score.toFixed(3)})
+                          {d.record_skip_reason ? ` [${d.record_skip_reason}]` : ""}
+                        </p>
+                      ))}
+                  </div>
+                </div>
+              )}
+            </div>
           )}
         </aside>
 

@@ -1,8 +1,11 @@
 import argparse
+import json
 import mimetypes
 import os
 import sys
 from pathlib import Path
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -305,6 +308,73 @@ def cmd_recent(args):
         )
 
 
+_API_BASE = os.getenv("MEMORY_API_URL", "http://localhost:8000")
+
+
+def _api_post(path: str, payload: dict | None = None) -> dict:
+    data = json.dumps(payload or {}).encode()
+    request = Request(
+        f"{_API_BASE}{path}",
+        data=data,
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urlopen(request) as response:
+            return json.loads(response.read())
+    except HTTPError as exc:
+        body = exc.read().decode()
+        try:
+            detail = json.loads(body).get("detail", body)
+        except (ValueError, KeyError):
+            detail = body
+        _exit_with_error(f"API error ({exc.code}): {detail}")
+    except URLError as exc:
+        _exit_with_error(f"Cannot reach API at {_API_BASE}: {exc.reason}")
+
+
+def cmd_forgetting_preview(_args):
+    report = _api_post("/api/forgetting/preview")
+    print(
+        f"Forgetting preview: scanned={report['scanned']} "
+        f"kept={report['kept']} faded={report['faded']} "
+        f"pruned={report['pruned']} duplicates={report['duplicates_flagged']}"
+    )
+    for decision in report["decisions"]:
+        if decision["action"] == "keep":
+            continue
+        print(
+            f"  {decision['action']:6s}  {decision['memory_type']:12s}  "
+            f"{decision['record_id'][:8]}  reason={decision['reason']}  "
+            f"score={decision['score']:.4f}"
+        )
+
+
+def cmd_forgetting_run(_args):
+    report = _api_post("/api/forgetting/run")
+    print(
+        f"Forgetting cycle: scanned={report['scanned']} "
+        f"kept={report['kept']} faded={report['faded']} "
+        f"pruned={report['pruned']} media_deleted={report['media_deleted']}"
+    )
+    for decision in report["decisions"]:
+        if decision["action"] == "keep":
+            continue
+        executed = "done" if decision["executed"] else "skipped"
+        print(
+            f"  {decision['action']:6s}  {decision['memory_type']:12s}  "
+            f"{decision['record_id'][:8]}  reason={decision['reason']}  [{executed}]"
+        )
+
+
+def cmd_forgetting_resolve(args):
+    result = _api_post(
+        "/api/forgetting/resolve",
+        {"keep_id": args.keep_id, "supersede_id": args.supersede_id},
+    )
+    print(f"Resolved: superseded {result['superseded_id'][:8]} → kept {result['kept_id'][:8]}")
+
+
 def main():
     parser = argparse.ArgumentParser(description="Agentic Memory CLI")
     sub = parser.add_subparsers(dest="command", required=True)
@@ -392,6 +462,13 @@ def main():
     recent_p = sub.add_parser("recent", help="Show recent episodic memories")
     recent_p.add_argument("n", type=int, help="Number of recent episodes to show")
 
+    sub.add_parser("forgetting-preview", help="Preview the next forgetting cycle (via API)")
+    sub.add_parser("forgetting-run", help="Run the forgetting cycle (via API)")
+
+    resolve_p = sub.add_parser("forgetting-resolve", help="Confirm a supersession (via API)")
+    resolve_p.add_argument("keep_id", help="ID of the record to keep")
+    resolve_p.add_argument("supersede_id", help="ID of the record to supersede")
+
     args = parser.parse_args()
 
     if args.command == "store":
@@ -427,6 +504,12 @@ def main():
         cmd_best_procedure(args)
     elif args.command == "recent":
         cmd_recent(args)
+    elif args.command == "forgetting-preview":
+        cmd_forgetting_preview(args)
+    elif args.command == "forgetting-run":
+        cmd_forgetting_run(args)
+    elif args.command == "forgetting-resolve":
+        cmd_forgetting_resolve(args)
 
 
 if __name__ == "__main__":
