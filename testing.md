@@ -1,174 +1,250 @@
-# Event Bus Phase 1 Test Plan
+# Forgetting Cycle Test Plan
 
 ## Purpose
 
-This document is the release gate for the event-bus work from issue `#4`.
-Implementation starts only after the expected behavior, scope boundaries, and
-verification steps are written down.
+This document is the implementation and release gate for issue `#44`:
+`ForgettingService` scan, score, fade/prune, duplicate handling, and media
+cleanup.
+
+The rule for this branch is simple: write the expected behavior down first,
+implement against it, then verify the branch against the same checklist before
+opening the PR.
 
 ## Scope For This PR
 
-This PR adds a synchronous, optional event bus to the current Phase 1 codebase.
-
 Included:
 
-- `events/bus.py` with `MemoryEvent` and `EventBus`
-- `events/logger.py` with a console subscriber for debugging
-- Event emission from `SemanticStore.store()`
-- Event emission from `UnifiedRetriever.query()`
-- CLI wiring so the demo path exercises the bus
-- Automated tests for the bus and the event-emission contract
+- `forgetting/service.py`
+- `ForgettingReport` and per-record decision entries
+- config knobs for prune thresholds, fade thresholds, fade behavior, and
+  procedural low-performance overrides
+- semantic duplicate-cluster resolution for the forgetting cycle
+- confirmed supersession forced-prune handling
+- fade via store `replace()`
+- prune via store `delete()` followed by owned-media deletion
+- per-record forgetting events and cycle summary events
+- automated tests for planning, execution, idempotency, and event payloads
 
 Explicitly not included:
 
-- Asynchronous dispatch or background queues
-- `EpisodicStore`, `ProceduralStore`, or `ForgettingService`
-- Persistence or replay of events
-- Wildcard subscriptions like `memory.*`
+- LLM judging for duplicate or contradiction resolution
+- transactional or cross-store atomic writes
+- Chroma compaction/rebuild automation
+- API/CLI endpoints for manually triggering the forgetting cycle
+- benchmark claims beyond a local sanity check on duplicate-cluster handling
 
-## Corrections To Issue Plan
+## Locked Design
 
-The issue is directionally correct, but the implementation plan needs these
-adjustments to match the repo and avoid over-promising:
+### Planning model
 
-1. Dispatch must be synchronous in this PR.
-The issue text says subscribers run asynchronously, but the design constraints in
-the same issue say Phase 1 is synchronous. This PR follows the design
-constraints, not the earlier asynchronous wording.
+The cycle operates in two phases:
 
-2. The base store constructor change must stay optional and non-breaking.
-`stores/base.py` is currently an abstract method interface only. If we touch it,
-the change must remain a convenience layer for concrete stores, not a new hard
-requirement for callers or future store implementations.
+1. Plan from a single snapshot:
+   scan stores, detect duplicate clusters, resolve forced actions, compute decay
+   scores with one shared `cycle_now`, and build the full decisions list.
+2. Execute from the completed plan:
+   apply fades, then prune records, then delete owned media for successfully
+   pruned records, then emit the cycle summary event.
 
-3. Event payloads must reflect current observable behavior only.
-This repo has one real store today (`semantic`). Payloads and tests should be
-written around current fields and current query stages, not future services.
+`dry_run=True` uses the same planning path but skips the mutation phase.
 
-4. Automated tests must not depend on the Gemini API.
-All tests added in this PR need deterministic fakes/stubs so the PR can be
-validated offline and repeatedly.
+### Duplicate resolution
 
-## Expected Behavior
+- Semantic likely-duplicate pairs are collapsed into connected components.
+- Each component produces one survivor.
+- The survivor is chosen by the deterministic chain:
+  supersession state, importance, access count, recency (`created_at`), ID.
+- All non-survivors are forced-pruned with reason `likely_duplicate`.
+- The duplicate resolver must be swappable later, but this PR ships the
+  deterministic default.
 
-### `memory.stored`
+### Forced-action precedence
 
-Emitted once after a semantic memory is successfully persisted.
+When multiple reasons could apply, the winning reason order is:
 
-Expected payload:
+1. `superseded`
+2. `likely_duplicate`
+3. `low_performance`
+4. `time_decay`
 
-- `record_id`
-- `memory_type`
-- `content`
-- `modality`
-- `importance`
+Confirmed supersession only forces prune when the successor record still exists.
 
-### `memory.retrieved`
+### Bucket policy
 
-Emitted once per `UnifiedRetriever.query()` call after raw retrieval fan-out is
-complete and before ranking.
+Per memory type:
 
-Expected payload:
+- score `< prune_threshold` -> `prune`
+- prune_threshold `<= score < fade_threshold` -> `fade`
+- score `>= fade_threshold` -> `keep`
 
-- `query`
-- `memory_types`
-- `candidate_count`
-- `top_similarity`
+Fade mutates `importance` with:
 
-Behavior notes:
+- `new_importance = max(FADE_FLOOR, old_importance * FADE_FACTOR)`
 
-- `memory_types` must reflect the stores actually queried.
-- `candidate_count` is the total number of raw candidates returned across all
-  queried stores.
-- `top_similarity` is the highest raw similarity across all candidates, or
-  `None` when there are no candidates.
+`0.0` remains reserved for confirmed supersession.
 
-### `memory.ranked`
+### Procedural low-performance policy
 
-Emitted once per `UnifiedRetriever.query()` call after ranking and before the
-method returns.
+- If `wilson_score < PROCEDURAL_LOW_PERF_WILSON_THRESHOLD` and
+  `total_outcomes >= PROCEDURAL_LOW_PERF_MIN_OUTCOMES`, forced-prune with reason
+  `low_performance`.
+- Otherwise low performance can still force `fade`, but does not force `prune`.
 
-Expected payload:
+### Reporting and events
 
-- `query`
-- `results` for the final `top_k` ranked results
-- `weights`
+`ForgettingReport` must include:
 
-Each result entry must include:
+- aggregate counters
+- `by_type`
+- `duplicates_flagged`
+- `decisions`
 
-- `record_id`
-- `content`
-- `final_score`
-- `raw_similarity`
-- `recency_score`
-- `importance_score`
-
-### `memory.accessed`
-
-Emitted once per returned record after access tracking is updated.
-
-Expected payload:
+Each decision entry must include:
 
 - `record_id`
 - `memory_type`
-- `access_count`
+- `action`
+- `reason`
+- `score`
+- `media_deleted`
 
-Behavior notes:
+Events:
 
-- The emitted `access_count` must be the post-increment value.
-- No `memory.accessed` event should fire for records that are not returned in the
-  final ranked output.
+- real run: per-record `memory.faded`, per-record `memory.pruned`,
+  summary `forgetting.cycle_completed`
+- dry run: summary `forgetting.cycle_dry_run` only
 
 ## Automated Test Matrix
 
-### Event bus core
+### Planning and reporting
 
-1. Subscriber receives emitted event with correct `event_type`, timestamp, and
-   data snapshot.
-2. Multiple subscribers to the same event are all called.
-3. Emitting an event with no subscribers is a no-op.
-4. Subscribers only receive the event names they registered for.
-5. Event data exposed to subscribers is isolated from later emitter-side
-   mutations.
+1. `run_cycle(dry_run=True)` returns a report with derived aggregate counters
+   that exactly match the `decisions` list.
+2. `dry_run=True` does not mutate any record, delete any record, or delete any
+   media file.
+3. All decisions in one cycle use the same `cycle_now` reference time.
+4. The report includes keep, fade, and prune decisions with stable reasons.
+5. Top-level counts are derived from decisions rather than maintained
+   separately.
 
-### Store integration
+### Duplicate handling
 
-1. `SemanticStore.store()` emits exactly one `memory.stored` event on success.
-2. The emitted payload matches the stored record metadata.
-3. No event is emitted if persistence fails before the write completes.
+1. A duplicate pair produces one survivor and one forced prune.
+2. A transitive duplicate cluster (`A~B`, `B~C`) is resolved component-wise with
+   exactly one survivor.
+3. The survivor is chosen by importance before access count, access count before
+   recency, recency before ID.
+4. Duplicate resolution is deterministic regardless of pair iteration order.
+5. Non-winning cluster members are reported as `likely_duplicate` prunes.
 
-### Retriever integration
+### Supersession handling
 
-1. `UnifiedRetriever.query()` emits `memory.retrieved` once with correct
-   candidate summary.
-2. `UnifiedRetriever.query()` emits `memory.ranked` once with the returned
-   ranked results and configured weights.
-3. `UnifiedRetriever.query()` emits one `memory.accessed` event per returned
-   record after incrementing access count.
-4. Querying with no hits still emits `memory.retrieved` and `memory.ranked`, but
-   emits no `memory.accessed`.
-5. Filtering with `memory_types` reports only the queried stores.
+1. A semantic record with `superseded_by` and an existing successor is forced to
+   prune even if its decay score would keep or fade it.
+2. If the successor record is missing, supersession does not force prune and the
+   record falls back to ordinary cycle logic.
+3. Supersession reason outranks all other reasons in the report and emitted
+   event payloads.
+
+### Decay buckets and fading
+
+1. Semantic records respect semantic prune and fade thresholds.
+2. Episodic records respect episodic prune and fade thresholds.
+3. Procedural records respect procedural prune and fade thresholds when no
+   low-performance override applies.
+4. Faded records persist with reduced importance using `FADE_FACTOR` and
+   `FADE_FLOOR`.
+5. Fading never sets importance to `0.0` unless the record was already
+   superseded outside the fade path.
+
+### Procedural low-performance overrides
+
+1. Low Wilson score with insufficient outcomes does not force prune.
+2. Low Wilson score with enough outcomes forces prune.
+3. Low performance without prune-level evidence forces fade.
+4. `low_performance` outranks ordinary `time_decay` when both apply.
+
+### Execution semantics
+
+1. Real runs apply fades through store `replace()` only after planning
+   completes.
+2. Real runs delete records through store `delete()` only after fade execution
+   is complete.
+3. Owned media is deleted only after the owning record is successfully deleted.
+4. Missing records during execution are treated as skipped/idempotent cases, not
+   counted as successful prunes.
+5. Missing media files do not increment `media_deleted`.
+6. Batched prune execution processes records in groups of 10.
+
+### Event contract
+
+1. `memory.faded` is emitted once per actual fade and includes record id,
+   memory type, reason, old importance, and new importance.
+2. `memory.pruned` is emitted once per actual prune and includes record id,
+   memory type, reason, and media context.
+3. `forgetting.cycle_completed` is emitted once per real run with the full
+   report payload.
+4. `forgetting.cycle_dry_run` is emitted once per dry run with the projected
+   report payload.
+5. Dry runs emit no per-record mutation events.
+
+### Integration and regression coverage
+
+1. Pruned records return `None` from `get_by_id`.
+2. Faded records remain retrievable and show the updated importance.
+3. Existing contradiction and decay tests still pass unchanged.
+4. Existing store and event integration tests still pass unchanged.
 
 ## Manual Verification
 
-These checks happen only after automated tests pass:
+These checks happen after automated tests pass.
 
-1. Run `python demo/cli.py store "Python was created by Guido van Rossum"` and
-   confirm the CLI still stores the record and logs `memory.stored`.
-2. Run `python demo/cli.py query "Who created Python?"` and confirm event logs
-   appear in this order:
-   `memory.retrieved` -> `memory.ranked` -> one or more `memory.accessed`.
-3. Confirm normal CLI output still appears after event logging and remains
-   readable.
+1. Seed one semantic duplicate cluster and one superseded semantic record, run
+   the cycle manually in Python, and inspect the returned report for one
+   survivor per cluster and one immediate supersession prune.
+2. Seed one media-backed episodic record that lands in prune and confirm the
+   record disappears before the owned media file is removed.
+3. Seed one procedural record that lands in fade and confirm its importance is
+   halved but remains above `FADE_FLOOR` when applicable.
+4. Run a dry cycle against the same dataset and confirm the report matches the
+   real-run plan while the database and media files remain unchanged.
+
+## API / Curl Checks
+
+No new API surface is planned in this PR, so there are no required `curl`
+acceptance checks for merge. If this branch grows an endpoint or admin trigger,
+the API contract and `curl` cases must be added here before shipping.
+
+## Formula Checks
+
+1. Verify bucket boundaries exactly at prune and fade thresholds.
+2. Verify fade math:
+   `new_importance = max(FADE_FLOOR, old_importance * FADE_FACTOR)`.
+3. Verify procedural prune override boundary at:
+   `wilson_score < PROCEDURAL_LOW_PERF_WILSON_THRESHOLD` and
+   `total_outcomes >= PROCEDURAL_LOW_PERF_MIN_OUTCOMES`.
+
+## Benchmark / Sanity Checks
+
+This PR does not claim production-scale optimization, but it should include one
+local sanity check:
+
+1. Duplicate-cluster planning on a moderate synthetic semantic dataset should
+   complete without pathological order sensitivity or exploding decision counts.
+
+If benchmark code is added, it should be documented in the PR description but
+kept out of the merge gate unless it is deterministic offline.
 
 ## Exit Criteria
 
 The PR can be opened only when all of the following are true:
 
-1. `testing.md` remains accurate to the shipped implementation.
-2. New automated tests pass locally.
-3. Existing automated tests still pass, or any pre-existing unrelated failures
-   are identified explicitly.
-4. Manual CLI verification is completed.
-5. The PR description documents the issue-plan corrections, especially the
-   synchronous Phase 1 dispatch choice.
+1. `testing.md` still matches the shipped implementation.
+2. New unit and integration tests for the forgetting cycle pass locally.
+3. Existing relevant test suites still pass locally, or any unrelated
+   pre-existing failures are explicitly called out.
+4. Manual verification for dry run, fade, prune, duplicate resolution, and
+   media cleanup is completed.
+5. The PR description explains the locked behavior: component-wise duplicate
+   resolution, staged execution, explicit fade bands, and swappable duplicate
+   resolver design.
