@@ -1,7 +1,7 @@
 from datetime import datetime, timezone
 from typing import Any
 
-from config import EMBEDDING_DIMENSIONS
+import config
 from events.bus import EventBus
 from models.base import MemoryRecord
 from stores.base import BaseStore
@@ -18,9 +18,17 @@ class UnifiedRetriever:
     once they are wired into that mapping.
     """
 
-    def __init__(self, stores: dict[str, BaseStore], event_bus: EventBus | None = None):
+    def __init__(
+        self,
+        stores: dict[str, BaseStore],
+        event_bus: EventBus | None = None,
+        embedding_dimensions: int | None = None,
+    ):
         self._stores = stores
         self._event_bus = event_bus
+        self._embedding_dimensions = (
+            config.EMBEDDING_DIMENSIONS if embedding_dimensions is None else embedding_dimensions
+        )
 
     def _emit_event(self, event_type: str, data: dict[str, Any]) -> None:
         if self._event_bus is not None:
@@ -121,9 +129,9 @@ class UnifiedRetriever:
         return final
 
     def _validate_vector_dimensions(self, vector: list[float]) -> None:
-        if len(vector) != EMBEDDING_DIMENSIONS:
+        if len(vector) != self._embedding_dimensions:
             raise ValueError(
-                f"Expected query vector dimension {EMBEDDING_DIMENSIONS}, got {len(vector)}"
+                f"Expected query vector dimension {self._embedding_dimensions}, got {len(vector)}"
             )
 
     def query(

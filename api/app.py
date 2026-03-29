@@ -4,7 +4,6 @@ import json
 import mimetypes
 import os
 import tempfile
-from collections import deque
 from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
@@ -14,20 +13,16 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 
 import config
-from events.bus import MemoryEvent
-from events import EventBus
 from models.base import MemoryRecord, normalize_modality
 from models.episodic import EpisodicMemory
 from models.procedural import ProceduralMemory
 from models.semantic import SemanticMemory
-from retrieval.retriever import UnifiedRetriever
-from stores.episodic_store import EpisodicStore, EpisodicStoreError, MediaTooLargeError
-from stores.media_store import MediaStore
+from runtime import build_runtime
+from stores.episodic_store import EpisodicStoreError, MediaTooLargeError
 from stores.procedural_store import ProceduralMatch, ProceduralStore
-from stores.semantic_store import SemanticStore
 from forgetting.contradiction import ContradictionCandidate, ContradictionDetector
 from forgetting.service import ForgettingReport, ForgettingService
-from utils.embeddings import EmbeddingProviderError, GeminiEmbedder, TextEmbedder
+from utils.embeddings import EmbeddingProviderError, TextEmbedder
 
 DEFAULT_ALLOWED_ORIGINS = [
     "http://localhost:3000",
@@ -46,16 +41,6 @@ def _normalise_origins(origins: list[str] | None = None) -> list[str]:
     if not env_value:
         return DEFAULT_ALLOWED_ORIGINS
     return [origin.strip() for origin in env_value.split(",") if origin.strip()]
-
-
-def _jsonable(value: Any) -> Any:
-    if isinstance(value, Mapping):
-        return {key: _jsonable(val) for key, val in value.items()}
-    if isinstance(value, (list, tuple, set, frozenset)):
-        return [_jsonable(item) for item in value]
-    if isinstance(value, datetime):
-        return value.isoformat()
-    return value
 
 
 def _infer_media_contract(*, mime_type: str | None, filename: str | None) -> tuple[str, str] | None:
@@ -279,36 +264,6 @@ def _serialise_procedural_match(match: ProceduralMatch) -> dict[str, Any]:
     }
 
 
-class EventRecorder:
-    def __init__(self, bus: EventBus, *, max_events: int = 200):
-        self._events: deque[dict[str, Any]] = deque(maxlen=max_events)
-        for event_type in (
-            "memory.stored",
-            "memory.retrieved",
-            "memory.ranked",
-            "memory.accessed",
-            "memory.contradiction_flagged",
-            "memory.supersession_resolved",
-            "memory.faded",
-            "memory.forgotten",
-            "forgetting.cycle_completed",
-            "forgetting.cycle_dry_run",
-        ):
-            bus.subscribe(event_type, self._record)
-
-    def _record(self, event: MemoryEvent) -> None:
-        self._events.appendleft(
-            {
-                "event_type": event.event_type,
-                "timestamp": event.timestamp.isoformat(),
-                "data": _jsonable(dict(event.data)),
-            }
-        )
-
-    def snapshot(self, limit: int = 50) -> list[dict[str, Any]]:
-        return list(self._events)[:limit]
-
-
 class MemoryAPIService:
     def __init__(
         self,
@@ -316,51 +271,24 @@ class MemoryAPIService:
         chroma_path: str | None = None,
         media_root: Path | None = None,
         embedder: TextEmbedder | None = None,
+        embedding_dimensions: int | None = None,
     ):
-        self.media_store = MediaStore(media_root or DEFAULT_MEDIA_DIR)
-        self.bus = EventBus()
-        self.embedder = embedder or GeminiEmbedder()
-        original_chroma_path = config.CHROMA_DB_PATH
-        try:
-            if chroma_path is not None:
-                config.CHROMA_DB_PATH = chroma_path
-            self.semantic_store = SemanticStore(
-                event_bus=self.bus,
-                embedder=self.embedder,
-                media_store=self.media_store,
-            )
-            self.episodic_store = EpisodicStore(
-                event_bus=self.bus,
-                embedder=self.embedder,
-                media_store=self.media_store,
-            )
-            self.procedural_store = ProceduralStore(
-                event_bus=self.bus,
-                embedder=self.embedder,
-                media_store=self.media_store,
-            )
-        finally:
-            config.CHROMA_DB_PATH = original_chroma_path
-        self.retriever = UnifiedRetriever(
-            stores={
-                "semantic": self.semantic_store,
-                "episodic": self.episodic_store,
-                "procedural": self.procedural_store,
-            },
-            event_bus=self.bus,
+        runtime = build_runtime(
+            chroma_path=chroma_path,
+            media_root=media_root or DEFAULT_MEDIA_DIR,
+            embedder=embedder,
+            embedding_dimensions=embedding_dimensions,
         )
-        self.contradiction_detector = ContradictionDetector(
-            self.semantic_store, event_bus=self.bus,
-        )
-        self.forgetting_service = ForgettingService(
-            semantic_store=self.semantic_store,
-            episodic_store=self.episodic_store,
-            procedural_store=self.procedural_store,
-            media_store=self.media_store,
-            event_bus=self.bus,
-            contradiction_detector=self.contradiction_detector,
-        )
-        self.events = EventRecorder(self.bus)
+        self.media_store = runtime.media_store
+        self.bus = runtime.bus
+        self.embedder = runtime.embedder
+        self.semantic_store = runtime.semantic_store
+        self.episodic_store = runtime.episodic_store
+        self.procedural_store = runtime.procedural_store
+        self.retriever = runtime.retriever
+        self.contradiction_detector = runtime.contradiction_detector
+        self.forgetting_service = runtime.forgetting_service
+        self.events = runtime.events
 
     def save_upload(self, upload: UploadFile, memory_id: str) -> tuple[str, str]:
         guessed_mime = upload.content_type or mimetypes.guess_type(upload.filename or "")[0] or "application/octet-stream"
@@ -449,6 +377,7 @@ def create_app(
     media_root: str | None = None,
     allowed_origins: list[str] | None = None,
     embedder: TextEmbedder | None = None,
+    embedding_dimensions: int | None = None,
 ) -> FastAPI:
     app = FastAPI(title="Agentic Memory API", version="0.1.0")
     app.add_middleware(
@@ -463,6 +392,7 @@ def create_app(
         "chroma_path": chroma_path,
         "media_root": Path(media_root) if media_root else None,
         "embedder": embedder,
+        "embedding_dimensions": embedding_dimensions,
     }
 
     def service() -> MemoryAPIService:
