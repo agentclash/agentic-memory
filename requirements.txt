@@ -1,9 +1,1 @@
-chromadb==1.5.5
-fastapi==0.116.1
-google-genai==1.68.0
-httpx==0.28.1
-mcp[cli]==1.26.0
-numpy==2.4.3
-python-multipart==0.0.20
-python-dotenv==1.2.2
-uvicorn==0.35.0
+.[api,mcp]

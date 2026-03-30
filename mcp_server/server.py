@@ -554,7 +554,7 @@ def _load_fastmcp():
     except ImportError as exc:  # pragma: no cover - import depends on optional dependency
         raise RuntimeError(
             "The 'mcp' package is required to run the MCP server. "
-            "Install it with: pip install \"mcp[cli]\""
+            "Install it with: pip install \".[mcp]\""
         ) from exc
     return FastMCP
 
@@ -803,7 +803,8 @@ def create_http_app(server: MemoryMCPServer):
     except ImportError as exc:  # pragma: no cover - import depends on optional dependency
         raise RuntimeError(
             "Starlette is required for streamable-http transport. "
-            "Install the API or MCP dependencies before starting the HTTP server."
+            "Install the MCP dependencies before starting the HTTP server: "
+            "pip install \".[mcp]\""
         ) from exc
 
     mcp = create_mcp_server(server)
@@ -845,7 +846,8 @@ def main() -> None:
         import uvicorn
     except ImportError as exc:  # pragma: no cover - import depends on optional dependency
         raise RuntimeError(
-            "uvicorn is required for streamable-http transport."
+            "uvicorn is required for streamable-http transport. "
+            "Install it with: pip install \".[mcp]\""
         ) from exc
 
     app = create_http_app(server)
