@@ -85,6 +85,7 @@ def build_runtime(
     media_root: str | Path | None = None,
     embedder: TextEmbedder | None = None,
     embedding_dimensions: int | None = None,
+    max_media_bytes: int | None = None,
     max_events: int = 200,
 ) -> MemoryRuntime:
     resolved_media_root = (
@@ -125,6 +126,7 @@ def build_runtime(
         event_bus=bus,
         embedder=active_embedder,
         media_store=media_store,
+        max_media_bytes=max_media_bytes,
     )
     procedural_store = ProceduralStore(
         chroma_path=chroma_path,

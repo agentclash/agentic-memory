@@ -220,6 +220,7 @@ class MemoryMCPServer:
                 media_root=self._config.media_root,
                 embedder=self._embedder,
                 embedding_dimensions=self._config.embedding_dimensions,
+                max_media_bytes=self._max_media_bytes,
             )
         return self._runtime
 
@@ -442,7 +443,13 @@ class MemoryMCPServer:
                 raise ValueError(
                     f"Media file is not readable from the MCP server host: {path}"
                 )
-            self._validate_media_size(path=path, size_bytes=path.stat().st_size)
+            try:
+                size_bytes = path.stat().st_size
+            except OSError as exc:
+                raise FileNotFoundError(
+                    f"Media file is not readable from the MCP server host: {path}"
+                ) from exc
+            self._validate_media_size(path=path, size_bytes=size_bytes)
             media_type = MediaStore.resolve_media_type(path, requested_media_type)
             return PreparedMedia(path=path, media_type=media_type)
 
@@ -461,8 +468,8 @@ class MemoryMCPServer:
         suffix = Path(inline.filename or "").suffix
         if not suffix:
             suffix = (
-                mimetypes.guess_extension(inline.mime_type)
-                or _MEDIA_TYPE_SUFFIXES.get(requested_media_type or "")
+                _MEDIA_TYPE_SUFFIXES.get(requested_media_type or "")
+                or mimetypes.guess_extension(inline.mime_type)
                 or ""
             )
         handle = tempfile.NamedTemporaryFile(

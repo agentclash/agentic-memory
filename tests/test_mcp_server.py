@@ -120,9 +120,22 @@ def test_server_stores_local_media_paths_and_text_recall_finds_them(
 ):
     server = make_server()
     fd, source_path = tempfile.mkstemp(suffix=suffix, prefix="mcp_media_source_")
+    fd2, distractor_path = tempfile.mkstemp(suffix=suffix, prefix="mcp_media_distractor_")
     os.close(fd)
+    os.close(fd2)
     Path(source_path).write_bytes(content.encode("utf-8"))
+    Path(distractor_path).write_bytes(b"unrelated payload")
     try:
+        server.remember_episode(
+            RememberEpisodeRequest(
+                session_id="session-distractor",
+                text="Completely unrelated memory about another topic",
+                modality=modality,
+                media_type=media_type,
+                media={"file_path": distractor_path},
+                source_mime_type=mime_type,
+            )
+        )
         response = server.remember_episode(
             RememberEpisodeRequest(
                 session_id="session-media",
@@ -149,6 +162,7 @@ def test_server_stores_local_media_paths_and_text_recall_finds_them(
         cleanup_dir(server.config.chroma_path or "")
         cleanup_dir(server.config.media_root or "")
         Path(source_path).unlink(missing_ok=True)
+        Path(distractor_path).unlink(missing_ok=True)
 
 
 def test_prepare_media_cleans_up_temp_file_when_media_type_resolution_fails():
@@ -224,6 +238,79 @@ def test_prepare_media_reports_local_path_errors_from_server_host_view():
             )
         assert "MCP server host" in str(exc_info.value)
         assert missing_path in str(exc_info.value)
+    finally:
+        cleanup_dir(server.config.chroma_path or "")
+        cleanup_dir(server.config.media_root or "")
+
+
+def test_prepare_media_wraps_stat_race_with_server_host_error(monkeypatch: pytest.MonkeyPatch):
+    server = make_server()
+    fd, source_path = tempfile.mkstemp(suffix=".png", prefix="mcp_media_source_")
+    os.close(fd)
+    path = Path(source_path)
+    path.write_bytes(b"image-bytes")
+
+    original_stat = Path.stat
+
+    monkeypatch.setattr(Path, "exists", lambda self: True)
+    monkeypatch.setattr(Path, "is_file", lambda self: True)
+    monkeypatch.setattr(os, "access", lambda *_args, **_kwargs: True)
+
+    def flaky_stat(self: Path, *args, **kwargs):
+        if self == path:
+            raise FileNotFoundError(str(self))
+        return original_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+    try:
+        with pytest.raises(FileNotFoundError) as exc_info:
+            server._prepare_media(  # type: ignore[attr-defined]
+                RememberEpisodeRequest(
+                    session_id="session-1",
+                    text="Racey screenshot",
+                    media={"file_path": source_path},
+                ).media,
+                "image",
+            )
+        assert str(exc_info.value) == f"Media file is not readable from the MCP server host: {path}"
+    finally:
+        cleanup_dir(server.config.chroma_path or "")
+        cleanup_dir(server.config.media_root or "")
+        path.unlink(missing_ok=True)
+
+
+def test_prepare_media_prefers_canonical_requested_suffix_for_inline_audio():
+    server = make_server()
+    try:
+        payload = base64.b64encode(b"sprint recap audio").decode("ascii")
+        prepared = server._prepare_media(  # type: ignore[attr-defined]
+            RememberEpisodeRequest(
+                session_id="session-1",
+                text="Audio attachment",
+                media={
+                    "inline_content": {
+                        "inline_base64": payload,
+                        "mime_type": "audio/mpeg",
+                    }
+                },
+                media_type="audio",
+            ).media,
+            "audio",
+        )
+        assert prepared is not None
+        assert prepared.path.suffix == ".mp3"
+        assert prepared.media_type == "audio"
+    finally:
+        if "prepared" in locals() and prepared is not None:
+            server._cleanup_prepared_media(prepared)  # type: ignore[attr-defined]
+        cleanup_dir(server.config.chroma_path or "")
+        cleanup_dir(server.config.media_root or "")
+
+
+def test_server_threads_custom_media_limit_into_runtime_store():
+    server = make_server(max_media_bytes=8)
+    try:
+        assert server.runtime().episodic_store._max_media_bytes == 8  # type: ignore[attr-defined]
     finally:
         cleanup_dir(server.config.chroma_path or "")
         cleanup_dir(server.config.media_root or "")
