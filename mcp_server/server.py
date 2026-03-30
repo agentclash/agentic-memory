@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import config
+import config as app_config
 from mcp_server.schemas import (
     DEFAULT_MAX_CONTRADICTIONS,
     ForgettingCycleRequest,
@@ -61,6 +61,12 @@ logger = logging.getLogger(__name__)
 
 _TRANSPORTS = {"stdio", "streamable-http"}
 _MCP_SERVER_NAME = "agentic-memory"
+_MEDIA_TYPE_SUFFIXES = {
+    "image": ".png",
+    "audio": ".mp3",
+    "video": ".mp4",
+    "pdf": ".pdf",
+}
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,8 +107,8 @@ class ServerConfig:
 
         if self.transport == "streamable-http":
             for label, raw_path in (
-                ("MEMORY_CHROMA_PATH", self.chroma_path or config.CHROMA_DB_PATH),
-                ("MEMORY_MEDIA_DIR", self.media_root or config.MEDIA_STORAGE_PATH),
+                ("MEMORY_CHROMA_PATH", self.chroma_path or app_config.CHROMA_DB_PATH),
+                ("MEMORY_MEDIA_DIR", self.media_root or app_config.MEDIA_STORAGE_PATH),
             ):
                 if not Path(raw_path).is_absolute():
                     logger.warning(
@@ -193,9 +199,13 @@ class MemoryMCPServer:
         *,
         config: ServerConfig,
         embedder: TextEmbedder | None = None,
+        max_media_bytes: int | None = None,
     ) -> None:
         self._config = config.validate()
         self._embedder = embedder
+        self._max_media_bytes = (
+            app_config.MEDIA_EMBED_MAX_BYTES if max_media_bytes is None else max_media_bytes
+        )
         self._runtime: MemoryRuntime | None = None
         self._forgetting_lock = asyncio.Lock()
 
@@ -423,11 +433,16 @@ class MemoryMCPServer:
         if media.file_path:
             path = Path(media.file_path).expanduser()
             if not path.exists():
-                raise FileNotFoundError(f"Media file not found: {path}")
+                raise FileNotFoundError(
+                    f"Media file is not readable from the MCP server host: {path}"
+                )
             if not path.is_file():
-                raise ValueError(f"Media path is not a file: {path}")
+                raise ValueError(f"Media path is not a file on the MCP server host: {path}")
             if not os.access(path, os.R_OK):
-                raise ValueError(f"Media file is not readable: {path}")
+                raise ValueError(
+                    f"Media file is not readable from the MCP server host: {path}"
+                )
+            self._validate_media_size(path=path, size_bytes=path.stat().st_size)
             media_type = MediaStore.resolve_media_type(path, requested_media_type)
             return PreparedMedia(path=path, media_type=media_type)
 
@@ -441,10 +456,15 @@ class MemoryMCPServer:
             raise ValueError("inline_base64 must be valid base64") from exc
         if not payload:
             raise ValueError("Cannot store empty media payload")
+        self._validate_media_size(size_bytes=len(payload))
 
         suffix = Path(inline.filename or "").suffix
         if not suffix:
-            suffix = mimetypes.guess_extension(inline.mime_type) or ""
+            suffix = (
+                mimetypes.guess_extension(inline.mime_type)
+                or _MEDIA_TYPE_SUFFIXES.get(requested_media_type or "")
+                or ""
+            )
         handle = tempfile.NamedTemporaryFile(
             prefix="agentic_memory_mcp_",
             suffix=suffix,
@@ -472,6 +492,21 @@ class MemoryMCPServer:
             prepared_media.path.unlink(missing_ok=True)
         except OSError:
             logger.warning("Failed to remove temporary media file %s", prepared_media.path)
+
+    def _validate_media_size(
+        self,
+        *,
+        size_bytes: int,
+        path: Path | None = None,
+    ) -> None:
+        if size_bytes <= self._max_media_bytes:
+            return
+
+        location = f" path={path}" if path is not None else ""
+        raise MediaTooLargeError(
+            "Cannot store MCP media input: "
+            f"size_bytes={size_bytes} limit_bytes={self._max_media_bytes}{location}"
+        )
 
     @staticmethod
     def _resolve_media_contract(
