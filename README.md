@@ -10,25 +10,52 @@ Built on **Gemini Embedding 2** for natively multimodal embeddings — text, ima
 
 ## Quickstart
 
-### 1. Install dependencies
+### 1. Create a virtual environment
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
+python -m pip install --upgrade pip
+```
+
+### 2. Install only the pieces you need
+
+```bash
+# Core memory runtime only
+pip install .
+
+# FastAPI server
+pip install ".[api]"
+
+# MCP server only
+pip install ".[mcp]"
+
+# Local backend development (API + MCP)
+pip install ".[api,mcp]"
+```
+
+`requirements.txt` remains as a convenience alias for the legacy "install API + MCP together" flow:
+
+```bash
 pip install -r requirements.txt
 ```
 
-### 2. Set up environment
+The MCP packaging is tested against `mcp[cli]==1.26.0`.
+
+### 3. Set up environment
 
 Create a `.env` file in the project root:
 
-```
+```dotenv
 GEMINI_API_KEY=your_key_here
+MEMORY_CHROMA_PATH=./chroma_db
+MEMORY_MEDIA_DIR=./data/media
+EMBEDDING_DIMENSIONS=768
 ```
 
-### 3. Install system dependencies
+### 4. Install system dependencies
 
-Audio and video chunking requires ffmpeg:
+Audio and video chunking requires `ffmpeg`:
 
 ```bash
 # arch
@@ -41,15 +68,35 @@ sudo apt install ffmpeg
 brew install ffmpeg
 ```
 
-### 4. Start the API server
+### 5. Run only what you need
+
+Start the API server:
 
 ```bash
 .venv/bin/python -m uvicorn api.app:app --port 8000 --reload
 ```
 
-The API is now running at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
+The API runs at `http://localhost:8000`. Interactive docs are at `http://localhost:8000/docs`.
 
-### 5. Start the playground UI
+Start the MCP server over local stdio:
+
+```bash
+MEMORY_MCP_TRANSPORT=stdio .venv/bin/agentic-memory-mcp
+```
+
+Start the MCP server over streamable HTTP:
+
+```bash
+MEMORY_MCP_TRANSPORT=streamable-http \
+MEMORY_MCP_HOST=127.0.0.1 \
+MEMORY_MCP_PORT=8001 \
+MEMORY_MCP_PATH=/mcp \
+.venv/bin/agentic-memory-mcp
+```
+
+For streamable HTTP, the MCP endpoint is mounted at `/mcp` and health is exposed at `/health`.
+
+Start the playground UI:
 
 ```bash
 cd web
@@ -57,30 +104,187 @@ npm install
 NEXT_PUBLIC_MEMORY_API_BASE_URL=http://localhost:8000 npm run dev
 ```
 
-The playground is now running at `http://localhost:3000`.
+The playground runs at `http://localhost:3000`.
 
 ---
 
 ## MCP Server
 
-The repo also ships a thin MCP server under `mcp_server/` that reuses the shared runtime.
+The repo ships a standalone MCP server under `mcp_server/` that reuses the shared runtime and does not require FastAPI or Next.js to be running.
 
-### Local stdio transport
+### Client setup examples
 
-```bash
-MEMORY_MCP_TRANSPORT=stdio .venv/bin/python -m mcp_server
-```
+#### Claude Code
 
-### Streamable HTTP transport
+Add a local stdio server for the current project:
 
 ```bash
-MEMORY_MCP_TRANSPORT=streamable-http \
-MEMORY_MCP_HOST=127.0.0.1 \
-MEMORY_MCP_PORT=8000 \
-.venv/bin/python -m mcp_server
+claude mcp add agentic-memory \
+  -s project \
+  -e GEMINI_API_KEY="$GEMINI_API_KEY" \
+  -e MEMORY_CHROMA_PATH="$PWD/chroma_db" \
+  -e MEMORY_MEDIA_DIR="$PWD/data/media" \
+  -- .venv/bin/agentic-memory-mcp
 ```
 
-When running over HTTP, the MCP endpoint is mounted at `/mcp` and health is exposed at `/health`.
+Add a streamable HTTP server instead:
+
+```bash
+claude mcp add --transport http agentic-memory http://127.0.0.1:8001/mcp
+```
+
+#### Cursor
+
+Project-local stdio config in `.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "agentic-memory": {
+      "command": "${workspaceFolder}/.venv/bin/agentic-memory-mcp",
+      "env": {
+        "GEMINI_API_KEY": "${env:GEMINI_API_KEY}",
+        "MEMORY_CHROMA_PATH": "${workspaceFolder}/chroma_db",
+        "MEMORY_MEDIA_DIR": "${workspaceFolder}/data/media",
+        "MEMORY_MCP_TRANSPORT": "stdio"
+      }
+    }
+  }
+}
+```
+
+Project-local streamable HTTP config:
+
+```json
+{
+  "mcpServers": {
+    "agentic-memory": {
+      "url": "http://127.0.0.1:8001/mcp"
+    }
+  }
+}
+```
+
+#### Windsurf
+
+User config lives at `~/.codeium/windsurf/mcp_config.json`.
+
+Local stdio config:
+
+```json
+{
+  "mcpServers": {
+    "agentic-memory": {
+      "command": "/absolute/path/to/agentic-memory/.venv/bin/agentic-memory-mcp",
+      "env": {
+        "GEMINI_API_KEY": "${env:GEMINI_API_KEY}",
+        "MEMORY_CHROMA_PATH": "/absolute/path/to/agentic-memory/chroma_db",
+        "MEMORY_MEDIA_DIR": "/absolute/path/to/agentic-memory/data/media",
+        "MEMORY_MCP_TRANSPORT": "stdio"
+      }
+    }
+  }
+}
+```
+
+Streamable HTTP config:
+
+```json
+{
+  "mcpServers": {
+    "agentic-memory": {
+      "serverUrl": "http://127.0.0.1:8001/mcp"
+    }
+  }
+}
+```
+
+#### Generic streamable HTTP clients
+
+Any MCP client that supports streamable HTTP should point at the full MCP endpoint URL, not just the host:
+
+```text
+http://127.0.0.1:8001/mcp
+```
+
+Health checks are available separately at:
+
+```text
+http://127.0.0.1:8001/health
+```
+
+### Environment variables
+
+#### Shared runtime
+
+| Variable | Default | Used by | Notes |
+|----------|---------|---------|-------|
+| `GEMINI_API_KEY` | unset | core, API, MCP | Required for real embeddings; tests use deterministic embedders instead. |
+| `EMBEDDING_DIMENSIONS` | `768` | core, API, MCP | Must match the dimensions of already-indexed vectors. Changing this requires reindexing into a fresh Chroma path. |
+| `MEDIA_STORAGE_PATH` | `./data/media` | core | Base default for app-owned media storage. |
+| `MEMORY_MEDIA_DIR` | falls back to `MEDIA_STORAGE_PATH` | API, MCP | Explicit media root for API and MCP processes. Prefer an absolute path for remote HTTP deployments. |
+| `MEMORY_CHROMA_PATH` | falls back to `./chroma_db` | MCP | Explicit Chroma persistence path for the MCP server. Prefer an absolute path for remote HTTP deployments. |
+| `MEDIA_EMBED_MAX_BYTES` | `20971520` | core, API, MCP | Per-file embedding limit in bytes. |
+
+#### API transport
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `MEMORY_ALLOWED_ORIGINS` | `http://localhost:3000,https://memory.agentclash.dev` | Comma-separated CORS allowlist for the FastAPI server. |
+
+#### MCP transport
+
+| Variable | Default | Notes |
+|----------|---------|-------|
+| `MEMORY_MCP_TRANSPORT` | `stdio` | One of `stdio` or `streamable-http`. |
+| `MEMORY_MCP_HOST` | `127.0.0.1` | Bind host for streamable HTTP mode. |
+| `MEMORY_MCP_PORT` | `8000` | Bind port for streamable HTTP mode. |
+| `MEMORY_MCP_PATH` | `/mcp` | Mount path for the MCP endpoint. |
+
+#### Forgetting and ranking tuning
+
+| Variable | Default |
+|----------|---------|
+| `SEMANTIC_HALF_LIFE_DAYS` | `365` |
+| `EPISODIC_HALF_LIFE_DAYS` | `30` |
+| `PROCEDURAL_HALF_LIFE_DAYS` | `180` |
+| `IMPORTANCE_FLOOR_THRESHOLD` | `0.8` |
+| `IMPORTANCE_FLOOR_MULTIPLIER` | `3.0` |
+| `ACCESS_NORMALIZATION_CONSTANT` | `50` |
+| `SEMANTIC_PRUNE_THRESHOLD` | `0.1` |
+| `SEMANTIC_FADE_THRESHOLD` | `0.2` |
+| `EPISODIC_PRUNE_THRESHOLD` | `0.2` |
+| `EPISODIC_FADE_THRESHOLD` | `0.35` |
+| `PROCEDURAL_PRUNE_THRESHOLD` | `0.15` |
+| `PROCEDURAL_FADE_THRESHOLD` | `0.3` |
+| `SEMANTIC_DUPLICATE_THRESHOLD` | `0.95` |
+| `FADE_FACTOR` | `0.5` |
+| `FADE_FLOOR` | `0.01` |
+| `PROCEDURAL_LOW_PERF_WILSON_THRESHOLD` | `0.1` |
+| `PROCEDURAL_LOW_PERF_MIN_OUTCOMES` | `10` |
+
+### Operational caveats
+
+#### Remote media-path caveat
+
+When an MCP tool call includes `media.file_path`, that path is resolved from the MCP server host's filesystem, not the caller's machine. For remote `streamable-http` deployments:
+
+- use inline base64 media when the client cannot write to the server host
+- or mount a shared filesystem and pass server-visible absolute paths
+- set `MEMORY_CHROMA_PATH` and `MEMORY_MEDIA_DIR` to absolute paths to avoid working-directory drift
+
+Relative paths are acceptable for local development but are intentionally treated as risky for remote HTTP deployments.
+
+#### 768 to 1536 embedding migration
+
+The default embedding size is `768`. Switching to `1536` is a reindex migration, not a live in-place flip:
+
+1. Stop writers to the old store.
+2. Point `EMBEDDING_DIMENSIONS=1536` at a fresh Chroma directory.
+3. Re-ingest memories into that new directory so every stored vector is regenerated at `1536` dimensions.
+4. Cut clients over only after the new store is fully rebuilt.
+
+Do not change `EMBEDDING_DIMENSIONS` against an existing Chroma dataset and continue writing to it. Mixed vector sizes will break retrieval and store invariants.
 
 ---
 

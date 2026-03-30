@@ -1,0 +1,58 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentic-memory"
+version = "0.1.0"
+description = "Cognitive memory framework for AI agents with API and MCP transports."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "chromadb==1.5.5",
+    "google-genai==1.68.0",
+    "httpx==0.28.1",
+    "numpy==2.4.3",
+    "pydantic>=2,<3",
+    "python-dotenv==1.2.2",
+]
+
+[project.optional-dependencies]
+api = [
+    "fastapi==0.116.1",
+    "python-multipart==0.0.20",
+    "uvicorn==0.35.0",
+]
+mcp = [
+    "mcp[cli]==1.26.0",
+    "uvicorn==0.35.0",
+]
+dev = [
+    "pytest>=8,<9",
+]
+
+[project.scripts]
+agentic-memory-mcp = "mcp_server.server:main"
+
+[tool.setuptools]
+py-modules = ["config", "runtime"]
+
+[tool.setuptools.packages.find]
+include = [
+    "api",
+    "api.*",
+    "events",
+    "events.*",
+    "forgetting",
+    "forgetting.*",
+    "mcp_server",
+    "mcp_server.*",
+    "models",
+    "models.*",
+    "retrieval",
+    "retrieval.*",
+    "stores",
+    "stores.*",
+    "utils",
+    "utils.*",
+]
