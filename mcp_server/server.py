@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import binascii
+import functools
 import logging
 import mimetypes
 import os
@@ -403,7 +404,13 @@ class MemoryMCPServer:
             return ForgettingReportModel(status="already_running", dry_run=dry_run)
 
         async with self._forgetting_lock:
-            report = self.runtime().forgetting_service.run_cycle(dry_run=dry_run)
+            report = await asyncio.get_running_loop().run_in_executor(
+                None,
+                functools.partial(
+                    self.runtime().forgetting_service.run_cycle,
+                    dry_run=dry_run,
+                ),
+            )
             return serialise_forgetting_report(report, max_decisions=request.max_decisions)
 
     def _prepare_media(
@@ -450,7 +457,11 @@ class MemoryMCPServer:
             handle.close()
 
         path = Path(handle.name)
-        media_type = MediaStore.resolve_media_type(path, requested_media_type)
+        try:
+            media_type = MediaStore.resolve_media_type(path, requested_media_type)
+        except Exception:
+            path.unlink(missing_ok=True)
+            raise
         return PreparedMedia(path=path, media_type=media_type, cleanup=True)
 
     @staticmethod
@@ -676,12 +687,18 @@ def create_mcp_server(
     ) -> RecallEpisodesResponse | ToolErrorModel:
         """Recall episodic memories by recent activity, session, or time range."""
         try:
+            if mode not in {"recent", "session", "time_range"}:
+                raise ValueError("mode must be one of: recent, session, time_range")
             payload: dict[str, Any] = {"mode": mode}
             if mode == "recent":
                 payload["limit"] = limit
             elif mode == "session":
+                if not session_id:
+                    raise ValueError("session_id is required when mode='session'")
                 payload["session_id"] = session_id
             elif mode == "time_range":
+                if not start or not end:
+                    raise ValueError("start and end are required when mode='time_range'")
                 payload["start"] = start
                 payload["end"] = end
             return server.recall_episodes(payload)

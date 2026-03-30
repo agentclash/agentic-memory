@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 from pathlib import Path
 
@@ -83,15 +84,63 @@ def test_server_materializes_inline_media_for_episode_storage():
         cleanup_dir(server.config.media_root or "")
 
 
+def test_prepare_media_cleans_up_temp_file_when_media_type_resolution_fails():
+    server = make_server()
+    before = {path for path in Path("/tmp").glob("agentic_memory_mcp_*")}
+    try:
+        payload = base64.b64encode(b"not a supported media type").decode("ascii")
+        with pytest.raises(ValueError):
+            server._prepare_media(  # type: ignore[attr-defined]
+                RememberEpisodeRequest(
+                    session_id="session-1",
+                    text="Unsupported inline media",
+                    media={
+                        "inline_content": {
+                            "inline_base64": payload,
+                            "mime_type": "application/octet-stream",
+                            "filename": "blob.bin",
+                        }
+                    },
+                ).media,
+                None,
+            )
+    finally:
+        after = {path for path in Path("/tmp").glob("agentic_memory_mcp_*")}
+        cleanup_dir(server.config.chroma_path or "")
+        cleanup_dir(server.config.media_root or "")
+
+    assert after == before
+
+
 @pytest.mark.anyio
 async def test_server_forgetting_cycle_is_single_flight():
     server = make_server()
     try:
-        await server._forgetting_lock.acquire()  # type: ignore[attr-defined]
+        loop = asyncio.get_running_loop()
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        original = server.runtime().forgetting_service.run_cycle
+
+        def slow_run_cycle(*, dry_run: bool):
+            started.set()
+            future = asyncio.run_coroutine_threadsafe(release.wait(), loop)
+            future.result(timeout=2)
+            return original(dry_run=dry_run)
+
+        server.runtime().forgetting_service.run_cycle = slow_run_cycle  # type: ignore[method-assign]
         try:
+            first_task = asyncio.create_task(
+                server.preview_forgetting_cycle(ForgettingCycleRequest(max_decisions=5))
+            )
+            await asyncio.wait_for(started.wait(), timeout=1)
             second = await server.preview_forgetting_cycle(ForgettingCycleRequest(max_decisions=5))
+            release.set()
+            first = await asyncio.wait_for(first_task, timeout=1)
         finally:
-            server._forgetting_lock.release()  # type: ignore[attr-defined]
+            server.runtime().forgetting_service.run_cycle = original  # type: ignore[method-assign]
+
+        assert first.status == "completed"
         assert second.status == "already_running"
     finally:
         cleanup_dir(server.config.chroma_path or "")
@@ -111,3 +160,8 @@ def test_streamable_http_config_allows_relative_paths_but_keeps_transport_valid(
 def test_invalid_transport_is_rejected():
     with pytest.raises(ValueError):
         ServerConfig(transport="http2").validate()
+
+
+def test_invalid_port_is_rejected():
+    with pytest.raises(ValueError):
+        ServerConfig(port=0).validate()
