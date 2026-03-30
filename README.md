@@ -61,6 +61,29 @@ The playground is now running at `http://localhost:3000`.
 
 ---
 
+## MCP Server
+
+The repo also ships a thin MCP server under `mcp_server/` that reuses the shared runtime.
+
+### Local stdio transport
+
+```bash
+MEMORY_MCP_TRANSPORT=stdio .venv/bin/python -m mcp_server
+```
+
+### Streamable HTTP transport
+
+```bash
+MEMORY_MCP_TRANSPORT=streamable-http \
+MEMORY_MCP_HOST=127.0.0.1 \
+MEMORY_MCP_PORT=8000 \
+.venv/bin/python -m mcp_server
+```
+
+When running over HTTP, the MCP endpoint is mounted at `/mcp` and health is exposed at `/health`.
+
+---
+
 ## CLI
 
 ```bash

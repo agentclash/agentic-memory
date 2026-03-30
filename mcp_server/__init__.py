@@ -1,5 +1,11 @@
 """Shared MCP contracts and helpers for the memory runtime."""
 
+from .server import (
+    MemoryMCPServer,
+    ServerConfig,
+    create_http_app,
+    create_mcp_server,
+)
 from .schemas import (
     ContradictionCandidateModel,
     ContradictionCheckModel,
@@ -24,6 +30,10 @@ from .schemas import (
 )
 
 __all__ = [
+    "MemoryMCPServer",
+    "ServerConfig",
+    "create_http_app",
+    "create_mcp_server",
     "ContradictionCandidateModel",
     "ContradictionCheckModel",
     "ForgettingCycleRequest",
