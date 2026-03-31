@@ -30,6 +30,9 @@ mcp = [
 dev = [
     "pytest>=8,<9",
 ]
+bench = [
+    "openai>=1,<2",
+]
 
 [project.scripts]
 agentic-memory-mcp = "mcp_server.server:main"

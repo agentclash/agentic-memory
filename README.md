@@ -513,6 +513,28 @@ All tests run offline with deterministic embedders (no Gemini API key required):
 .venv/bin/python tests/test_offline_episodic_eval.py
 ```
 
+### LongMemEval benchmark harness
+
+The repo also ships a LongMemEval harness for long-term conversational memory benchmarking.
+
+```bash
+# Fast oracle smoke test over MCP using Gemini Embedding 1
+.venv/bin/python benchmarks/longmemeval_eval.py \
+  --dataset oracle \
+  --backend mcp \
+  --embedding-model gemini-embedding-001 \
+  --limit 5
+
+# Faster direct-runtime debug run
+.venv/bin/python benchmarks/longmemeval_eval.py \
+  --dataset oracle \
+  --backend runtime \
+  --embedding-model gemini-embedding-001 \
+  --limit 5
+```
+
+The harness downloads the official cleaned LongMemEval dataset into `benchmarks/data/` on first run and writes hypotheses plus summaries under `benchmarks/data/longmemeval_results/`.
+
 ---
 
 ## Project structure
