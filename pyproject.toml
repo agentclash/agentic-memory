@@ -35,7 +35,7 @@ dev = [
 agentic-memory-mcp = "mcp_server.server:main"
 
 [tool.setuptools]
-py-modules = ["config", "runtime"]
+py-modules = ["config", "runtime", "agentic_memory"]
 
 [tool.setuptools.packages.find]
 include = [
