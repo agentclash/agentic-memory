@@ -44,7 +44,7 @@ class TestRemember:
             domain="security",
             confidence=0.95,
         )
-        record = mem.get(rid, type="semantic")
+        record = mem.get(rid, memory_type="semantic")
         assert record is not None
         assert record.importance == 0.9
         assert record.category == "infra"
@@ -56,7 +56,7 @@ class TestRemember:
 
     def test_remember_episode_with_session(self, mem: Memory):
         rid = mem.remember_episode("built the feature", session="sess-42", turn=3)
-        record = mem.get(rid, type="episodic")
+        record = mem.get(rid, memory_type="episodic")
         assert record is not None
         assert record.session_id == "sess-42"
         assert record.turn_number == 3
@@ -75,7 +75,7 @@ class TestRemember:
             preconditions=["kubectl access"],
             importance=0.8,
         )
-        record = mem.get(rid, type="procedural")
+        record = mem.get(rid, memory_type="procedural")
         assert record is not None
         assert record.preconditions == ["kubectl access"]
         assert record.importance == 0.8
@@ -104,6 +104,14 @@ class TestRecall:
             mem.remember(f"fact number {i} about testing")
         results = mem.recall("testing", top_k=2)
         assert len(results) <= 2
+
+    def test_recall_by_vector_finds_stored_memory(self, mem: Memory):
+        mem.remember("python is a programming language")
+        vector = mem.runtime.embedder.embed_query("programming language")
+        results = mem.recall_by_vector(vector)
+        assert len(results) > 0
+        assert isinstance(results[0], RankedResult)
+        assert results[0].record.content == "python is a programming language"
 
 
 class TestRecallEpisodes:
@@ -156,8 +164,9 @@ class TestContradictions:
         id1 = mem.remember("the capital of France is Paris")
         id2 = mem.remember("the capital of France is Paris and it is lovely")
         candidates = mem.find_contradictions(id1)
-        # With the hashing embedder, similar text produces similar vectors
         assert isinstance(candidates, list)
+        assert all(isinstance(candidate, ContradictionCandidate) for candidate in candidates)
+        assert any(candidate.record.id == id2 for candidate in candidates)
 
     def test_find_contradictions_missing_id_raises(self, mem: Memory):
         with pytest.raises(ValueError, match="not found"):
@@ -167,7 +176,7 @@ class TestContradictions:
         id1 = mem.remember("old fact")
         id2 = mem.remember("new fact replaces old")
         mem.resolve_contradiction(keep_id=id2, supersede_id=id1)
-        old = mem.get(id1, type="semantic")
+        old = mem.get(id1, memory_type="semantic")
         assert old is not None
         assert old.superseded_by == id2
         assert old.importance == 0.0
@@ -179,7 +188,7 @@ class TestOutcomes:
         mem.record_outcome(rid, success=True)
         mem.record_outcome(rid, success=True)
         mem.record_outcome(rid, success=False)
-        record = mem.get(rid, type="procedural")
+        record = mem.get(rid, memory_type="procedural")
         assert record.success_count == 2
         assert record.failure_count == 1
 
@@ -201,16 +210,16 @@ class TestForgetting:
 class TestDirectAccess:
     def test_get_semantic(self, mem: Memory):
         rid = mem.remember("fact")
-        record = mem.get(rid, type="semantic")
+        record = mem.get(rid, memory_type="semantic")
         assert record is not None
         assert record.content == "fact"
 
     def test_get_unknown_type_raises(self, mem: Memory):
-        with pytest.raises(ValueError, match="Unknown type"):
-            mem.get("some-id", type="invalid")
+        with pytest.raises(ValueError, match="Unknown memory_type"):
+            mem.get("some-id", memory_type="invalid")
 
     def test_get_missing_returns_none(self, mem: Memory):
-        result = mem.get("nonexistent", type="semantic")
+        result = mem.get("nonexistent", memory_type="semantic")
         assert result is None
 
     def test_overview(self, mem: Memory):
@@ -251,4 +260,12 @@ class TestExports:
             MemoryRecord,
         )
         assert Memory is not None
+        assert MemoryRuntime is not None
         assert RankedResult is not None
+        assert ContradictionCandidate is not None
+        assert ProceduralMatch is not None
+        assert ForgettingReport is not None
+        assert SemanticMemory is not None
+        assert EpisodicMemory is not None
+        assert ProceduralMemory is not None
+        assert MemoryRecord is not None
