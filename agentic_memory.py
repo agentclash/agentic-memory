@@ -41,6 +41,12 @@ __all__ = [
 ]
 
 
+def _infer_modality(media_ref: str | None, media_type: str | None) -> str:
+    if not media_ref:
+        return "text"
+    return media_type or "text"
+
+
 class Memory:
     """High-level interface to the cognitive memory system.
 
@@ -126,7 +132,7 @@ class Memory:
             media_ref=media_ref,
             media_type=media_type,
             text_description=text_description,
-            modality="text" if not media_ref else (media_type or "text"),
+            modality=_infer_modality(media_ref, media_type),
         )
         return self._runtime.semantic_store.store(record)
 
@@ -149,6 +155,9 @@ class Memory:
     ) -> str:
         """Store an episodic memory (event, interaction, experience).
 
+        When *participants* is omitted, the SDK defaults it to
+        ``["user", "agent"]``.
+
         Returns the record ID.
         """
         kwargs: dict[str, Any] = dict(
@@ -164,7 +173,7 @@ class Memory:
             media_ref=media_ref,
             media_type=media_type,
             text_description=text_description,
-            modality="text" if not media_ref else (media_type or "text"),
+            modality=_infer_modality(media_ref, media_type),
         )
         if session is not None:
             kwargs["session_id"] = session
@@ -198,7 +207,7 @@ class Memory:
             media_ref=media_ref,
             media_type=media_type,
             text_description=text_description,
-            modality="text" if not media_ref else (media_type or "text"),
+            modality=_infer_modality(media_ref, media_type),
         )
         return self._runtime.procedural_store.store(record)
 
@@ -342,12 +351,12 @@ class Memory:
 
     # ── direct access ─────────────────────────────────────────────────────
 
-    def get(self, record_id: str, *, type: str) -> MemoryRecord | None:
+    def get(self, record_id: str, *, memory_type: str) -> MemoryRecord | None:
         """Fetch a single record by ID and type.
 
         Parameters
         ----------
-        type:
+        memory_type:
             One of ``"semantic"``, ``"episodic"``, ``"procedural"``.
         """
         store_map = {
@@ -355,13 +364,19 @@ class Memory:
             "episodic": self._runtime.episodic_store,
             "procedural": self._runtime.procedural_store,
         }
-        store = store_map.get(type)
+        store = store_map.get(memory_type)
         if store is None:
-            raise ValueError(f"Unknown type '{type}'. Use 'semantic', 'episodic', or 'procedural'.")
+            raise ValueError(
+                f"Unknown memory_type '{memory_type}'. Use 'semantic', 'episodic', or 'procedural'."
+            )
         return store.get_by_id(record_id)
 
     def overview(self) -> dict[str, Any]:
-        """Return a summary of the memory system state."""
+        """Return a summary of the memory system state.
+
+        Note: this currently loads all records into memory to count them, so
+        it may be slow for large stores.
+        """
         semantic_count = len(self._runtime.semantic_store.get_all_records())
         episodic_count = len(self._runtime.episodic_store.get_all_records())
         procedural_count = len(self._runtime.procedural_store.get_all_records())
